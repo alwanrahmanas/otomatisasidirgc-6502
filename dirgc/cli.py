@@ -6,6 +6,7 @@ from playwright.sync_api import sync_playwright
 
 from .browser import ActivityMonitor, ensure_on_dirgc, install_user_activity_tracking
 from .credentials import load_credentials
+from .logging_utils import log_info
 from .processor import process_excel_rows
 from .settings import (
     DEFAULT_CREDENTIALS_FILE,
@@ -17,7 +18,9 @@ from .settings import (
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Login, process Excel rows, and stop after filling GC fields."
+        description=(
+            "Login, then process Excel rows or stop at the DIRGC page."
+        )
     )
     parser.add_argument(
         "--headless",
@@ -79,6 +82,16 @@ def build_parser():
         action="store_true",
         help="Keep the browser open until you press Enter.",
     )
+    parser.add_argument(
+        "--dirgc-only",
+        action="store_true",
+        help="Stop after reaching the DIRGC page (skip filter/input).",
+    )
+    parser.add_argument(
+        "--edit-nama-alamat",
+        action="store_true",
+        help="Aktifkan toggle edit Nama/Alamat Usaha dan isi dari Excel.",
+    )
     return parser
 
 
@@ -102,6 +115,8 @@ def run_dirgc(
     idle_timeout_ms=DEFAULT_IDLE_TIMEOUT_MS,
     web_timeout_s=DEFAULT_WEB_TIMEOUT_S,
     keep_open=False,
+    dirgc_only=False,
+    edit_nama_alamat=False,
     credentials=None,
     stop_event=None,
     progress_callback=None,
@@ -195,16 +210,28 @@ def run_dirgc(
             use_saved_credentials=not manual_only,
             credentials=credentials_value,
         )
-        process_excel_rows(
-            page,
-            monitor=monitor,
-            excel_file=excel_file,
-            use_saved_credentials=not manual_only,
-            credentials=credentials_value,
-            start_row=start_row,
-            end_row=end_row,
-            progress_callback=progress_callback,
-        )
+        if dirgc_only:
+            log_info(
+                "DIRGC page ready; skipping Excel processing.",
+                url=page.url,
+            )
+            if progress_callback:
+                try:
+                    progress_callback(0, 0, 0)
+                except Exception:
+                    pass
+        else:
+            process_excel_rows(
+                page,
+                monitor=monitor,
+                excel_file=excel_file,
+                use_saved_credentials=not manual_only,
+                credentials=credentials_value,
+                edit_nama_alamat=edit_nama_alamat,
+                start_row=start_row,
+                end_row=end_row,
+                progress_callback=progress_callback,
+            )
 
         if keep_open:
             if wait_for_close:
@@ -235,6 +262,8 @@ def main():
         idle_timeout_ms=args.idle_timeout_ms,
         web_timeout_s=args.web_timeout_s,
         keep_open=args.keep_open,
+        dirgc_only=args.dirgc_only,
+        edit_nama_alamat=args.edit_nama_alamat,
     )
 
 

@@ -17,6 +17,7 @@ LEGACY_EXCEL_FILE = "Direktori_SBR_20260114.xlsx"
 
 HASIL_GC_LABELS = {
     0: "Tidak Ditemukan",
+    99: "Tidak Ditemukan",
     1: "Ditemukan",
     3: "Tutup",
     4: "Ganda",

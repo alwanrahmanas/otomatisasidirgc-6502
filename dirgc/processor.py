@@ -18,6 +18,7 @@ def process_excel_rows(
     excel_file,
     use_saved_credentials,
     credentials,
+    edit_nama_alamat=False,
     start_row=None,
     end_row=None,
     progress_callback=None,
@@ -277,6 +278,79 @@ def process_excel_rows(
 
             safe_fill("#tt_latitude_cek_user", latitude, "latitude")
             safe_fill("#tt_longitude_cek_user", longitude, "longitude")
+
+            def ensure_edit_field(toggle_selector, input_selector, value, field_name):
+                if not value:
+                    return
+                toggle = page.locator(toggle_selector)
+                if toggle.count() == 0 or not toggle.first.is_visible():
+                    log_warn(
+                        "Toggle edit tidak ditemukan; lewati.",
+                        idsbr=idsbr or "-",
+                        field=field_name,
+                    )
+                    return
+                try:
+                    toggle_checked = toggle.first.is_checked()
+                except Exception:
+                    toggle_checked = False
+                if not toggle_checked:
+                    try:
+                        monitor.bot_click(toggle.first)
+                    except Exception as exc:
+                        log_warn(
+                            "Toggle edit gagal diklik; lewati.",
+                            idsbr=idsbr or "-",
+                            field=field_name,
+                            error=str(exc),
+                        )
+                        return
+
+                input_locator = page.locator(input_selector)
+                if (
+                    input_locator.count() == 0
+                    or not input_locator.first.is_visible()
+                ):
+                    log_warn(
+                        "Field edit tidak ditemukan; lewati.",
+                        idsbr=idsbr or "-",
+                        field=field_name,
+                    )
+                    return
+                if not monitor.wait_for_condition(
+                    lambda: input_locator.count() > 0
+                    and input_locator.first.is_editable(),
+                    timeout_s=5,
+                ):
+                    log_warn(
+                        "Field edit tidak bisa diedit; lewati.",
+                        idsbr=idsbr or "-",
+                        field=field_name,
+                    )
+                    return
+                try:
+                    current_value = input_locator.first.input_value()
+                except Exception:
+                    current_value = ""
+                current_value = (current_value or "").strip()
+                desired_value = str(value).strip()
+                if current_value == desired_value:
+                    return
+                monitor.bot_fill(input_selector, desired_value)
+
+            if edit_nama_alamat:
+                ensure_edit_field(
+                    "#toggle_edit_nama",
+                    "#tt_nama_usaha_gc",
+                    nama_usaha,
+                    "nama_usaha",
+                )
+                ensure_edit_field(
+                    "#toggle_edit_alamat",
+                    "#tt_alamat_usaha_gc",
+                    alamat,
+                    "alamat",
+                )
 
             if status == "gagal" and note == "Hasil GC tidak valid/kosong":
                 monitor.bot_goto(TARGET_URL)

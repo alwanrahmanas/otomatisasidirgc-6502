@@ -4,31 +4,24 @@
 
 Aplikasi CLI berbasis Playwright untuk membantu otomatisasi isian field GC berdasarkan data Excel, dilengkapi log untuk pemantauan. Tersedia GUI berbasis PyQt5 + QFluentWidgets untuk pengguna non-terminal.
 
-Jika ingin langsung menggunakan versi Installer GUI, lihat [packaging](https://github.com/bpskabbulungan/otomatisasidirgc-6502/tree/main/packaging). Akan tetapi, sebaiknya baca dokumentasinya dulu secara lengkap dan cermat sampai selesai agar lebih memahami alur kerjanya.
+Tersedia dua versi: GUI dan Script atau Terminal. Alur singkatnya: mulai dari [Persiapan (Python dan Git)](#persiapan-python-dan-git), lanjut ke [Unduh Project](#unduh-project) dan [Instal Dependensi](#instal-dependensi), siapkan [File Excel](#file-excel), lalu jalankan via [GUI](#cara-menjalankan---gui) atau [Script atau Terminal](#cara-menjalankan---script-atau-terminal), jangan lupa [Konfigurasi Akun SSO](#konfigurasi-akun-sso) jika memilih via terminal.
+
+Jika ingin langsung menggunakan versi Installer GUI, lihat [packaging](https://github.com/bpskabbulungan/otomatisasidirgc-6502/tree/main/packaging). Namun, sebaiknya baca dokumentasi ini dulu agar alur kerjanya lebih jelas.
 
 ## Daftar Isi
 
 - [Ringkasan](#ringkasan)
-- [Ringkasan Fitur](#ringkasan-fitur)
 - [Struktur Folder](#struktur-folder)
-- [Prasyarat](#prasyarat)
-- [Inisiasi](#inisiasi)
-- [Requirements](#requirements)
-- [Konfigurasi Akun SSO](#konfigurasi-akun-sso)
+- [Persiapan (Python dan Git)](#persiapan-python-dan-git)
+- [Unduh Project](#unduh-project)
+- [Instal Dependensi](#instal-dependensi)
 - [File Excel](#file-excel)
-- [Cara Menjalankan](#cara-menjalankan)
+- [Cara Menjalankan - GUI](#cara-menjalankan---gui)
+- [Cara Menjalankan - Script atau Terminal](#cara-menjalankan---script-atau-terminal)
+- [Konfigurasi Akun SSO](#konfigurasi-akun-sso)
 - [Catatan](#catatan)
 - [Output Log Excel](#output-log-excel)
 - [Kredit](#kredit)
-
-## Ringkasan Fitur
-
-- Auto-login (bila kredensial tersedia) dan fallback ke login manual/OTP.
-- Filter dan pemilihan usaha berdasarkan IDSBR/nama/alamat.
-- Pengisian Hasil GC, latitude, dan longitude dengan validasi sederhana.
-- Opsi pemrosesan parsial lewat `--start` dan `--end`.
-- Log terminal terstruktur dan file log Excel per run.
-- GUI modern untuk menjalankan proses tanpa terminal.
 
 ## Struktur Folder
 
@@ -45,35 +38,158 @@ Jika ingin langsung menggunakan versi Installer GUI, lihat [packaging](https://g
 `- README.md
 ```
 
-## Prasyarat
+## Persiapan (Python dan Git)
 
-- Python 3 sudah terpasang.
-- Akun dengan akses ke DIRGC (MatchaPro).
-- File Excel input tersedia di `data/` atau ditentukan lewat `--excel-file`.
+Bagian ini untuk pengguna awam. Jika Python dan Git sudah terpasang, lanjut ke [Unduh Project](#unduh-project).
 
-## Inisiasi
+### 1) Install Python
 
-Buka terminal CMD atau PowerShell, clone project dan masuk ke foldernya:
+Unduh dan instal Python 3 dari:
+https://www.python.org/downloads/
+
+Saat instalasi di Windows, centang opsi "Add Python to PATH", lalu lanjutkan sampai selesai.
+
+### 2) Install Git
+
+Unduh dan instal Git dari:
+https://git-scm.com/downloads
+
+### 3) Cek instalasi
+
+Buka PowerShell atau CMD, lalu jalankan:
+
+```bash
+python --version
+```
+
+Contoh output yang benar:
+`Python 3.11.6`
+
+Lalu cek Git:
+
+```bash
+git --version
+```
+
+Contoh output yang benar:
+`git version 2.44.0.windows.1`
+
+Jika `python` tidak dikenali, tutup dan buka ulang terminal. Jika masih gagal, ulangi instalasi Python dan pastikan opsi "Add Python to PATH" dicentang.
+
+## Unduh Project
+
+Buka PowerShell atau CMD, lalu jalankan perintah berikut satu per satu:
 
 ```bash
 git clone https://github.com/bpskabbulungan/otomatisasidirgc-6502.git
+```
+
+Perintah di atas mengunduh project dari GitHub.
+
+```bash
 cd otomatisasidirgc-6502
 ```
 
-## Requirements
+Perintah di atas masuk ke folder project (wajib sebelum menjalankan perintah lain).
 
-Install dependensi:
+## Instal Dependensi
+
+Pastikan masih berada di folder project `otomatisasidirgc-6502`, lalu jalankan:
 
 ```bash
-pip install -r requirements.txt
-playwright install chromium
+python -m pip install -r requirements.txt
 ```
 
-Catatan: `playwright install chromium` cukup dijalankan sekali per environment.
+Perintah di atas menginstal semua library Python yang dibutuhkan.
+
+```bash
+python -m playwright install chromium
+```
+
+Perintah di atas mengunduh browser Chromium yang diperlukan Playwright. Cukup dijalankan sekali per environment.
+
+## File Excel
+
+Default: `data/Direktori_SBR_20260114.xlsx` (bisa diganti via `--excel-file`).
+Jika file tidak ditemukan, sistem akan mencoba `Direktori_SBR_20260114.xlsx` di root project.
+
+Kolom yang dikenali:
+
+- `idsbr`
+- `nama_usaha` (atau `nama usaha` / `namausaha` / `nama`)
+- `alamat` (atau `alamat usaha` / `alamat_usaha`)
+- `latitude` / `lat`
+- `longitude` / `lon` / `long`
+- `hasil_gc` / `hasil gc` / `hasilgc` / `ag` / `keberadaanusaha_gc`
+
+Kode `hasil_gc` yang valid:
+
+- 0 / 99 = Tidak Ditemukan
+- 1 = Ditemukan
+- 3 = Tutup
+- 4 = Ganda
+
+Jika kolom `hasil_gc` tidak ditemukan, sistem memakai kolom ke-6 (`keberadaanusaha_gc`).
+
+## Cara Menjalankan - GUI
+
+GUI direkomendasikan untuk pengguna non-terminal. Pastikan semua langkah di atas sudah dilakukan.
+
+Jalankan perintah berikut dari folder project:
+
+```bash
+python run_dirgc_gui.py
+```
+
+Setelah GUI terbuka:
+
+1. Buka menu `Akun SSO`, isi username dan password jika ingin auto-login.
+2. Pilih file Excel (atau pastikan file default sudah ada di `data/`).
+3. Klik mulai/submit sesuai tombol yang tersedia pada GUI.
+
+## Cara Menjalankan - Script atau Terminal
+
+### Perintah dasar
+
+Jalankan perintah berikut dari folder project:
+
+```bash
+python run_dirgc.py
+```
+
+Perintah ini akan menggunakan file Excel default di `data/` dan mencoba auto-login jika kredensial tersedia.
+
+### Menentukan file Excel dan kredensial
+
+```bash
+python run_dirgc.py --excel-file data/Direktori_SBR_20260114.xlsx --credentials-file config/credentials.json
+```
+
+Perintah di atas memakai file Excel tertentu dan kredensial dari file JSON.
+
+### Membatasi baris yang diproses
+
+```bash
+python run_dirgc.py --start 1 --end 5
+```
+
+Perintah di atas hanya memproses baris 1 sampai 5 (1-based, inklusif).
+
+### Opsi CLI tambahan
+
+- `--headless` untuk menjalankan browser tanpa UI (SSO sering butuh mode non-headless).
+- `--idle-timeout-ms` untuk batas idle (default 300000 / 5 menit).
+- `--web-timeout-s` untuk toleransi loading web (default 30 detik).
+- `--manual-only` untuk selalu login manual (tanpa auto-fill kredensial).
+- `--dirgc-only` untuk berhenti di halaman DIRGC (tanpa filter/input).
+- `--edit-nama-alamat` untuk mengaktifkan toggle edit Nama/Alamat Usaha dan isi dari Excel.
+- `--keep-open` untuk menahan browser tetap terbuka setelah proses.
+
+Auto-login akan mencoba kredensial terlebih dulu; jika gagal/OTP muncul, akan beralih ke manual login.
 
 ## Konfigurasi Akun SSO
 
-Untuk CLI, letakkan file JSON di `config/credentials.json`:
+Untuk CLI, buat file `config/credentials.json` dengan isi berikut:
 
 ```json
 {
@@ -87,65 +203,9 @@ Atau gunakan environment variables:
 - `DIRGC_USERNAME`
 - `DIRGC_PASSWORD`
 
-Pencarian file kredensial juga mendukung fallback `credentials.json` di root project.
-Jika file dan environment variables tersedia, isi file akan diprioritaskan.
+Pencarian file kredensial juga mendukung fallback `credentials.json` di root project. Jika file dan environment variables tersedia, isi file akan diprioritaskan.
+
 Untuk GUI, isi kredensial lewat menu `Akun SSO` (tidak disimpan ke file).
-
-## File Excel
-
-Default: `data/Direktori_SBR_20260114.xlsx` (bisa diganti via `--excel-file`).
-Jika tidak ditemukan, sistem akan mencoba `Direktori_SBR_20260114.xlsx` di root project.
-
-Kolom yang dikenali:
-
-- `idsbr`
-- `nama_usaha` (atau `nama usaha` / `namausaha` / `nama`)
-- `alamat` (atau `alamat usaha` / `alamat_usaha`)
-- `latitude` / `lat`
-- `longitude` / `lon` / `long`
-- `hasil_gc` / `hasil gc` / `hasilgc` / `ag` / `keberadaanusaha_gc`
-
-Kode `hasil_gc` yang valid:
-
-- 0 = Tidak Ditemukan
-- 1 = Ditemukan
-- 3 = Tutup
-- 4 = Ganda
-
-Jika kolom `hasil_gc` tidak ditemukan, sistem memakai kolom ke-6 (`keberadaanusaha_gc`).
-
-## Cara Menjalankan
-
-GUI (direkomendasikan untuk pengguna non-terminal):
-
-```bash
-python run_dirgc_gui.py
-```
-
-Di GUI, buka menu `Akun SSO` untuk mengisi username dan password jika ingin auto-login.
-
-CLI:
-
-```bash
-python run_dirgc.py
-```
-
-Opsi CLI penting:
-
-```bash
-python run_dirgc.py --excel-file data/Direktori_SBR_20260114.xlsx --credentials-file config/credentials.json --manual-only --keep-open --start 1 --end 5
-```
-
-Gunakan `--start` dan `--end` untuk membatasi baris yang diproses (1-based, inklusif).
-
-Opsi tambahan:
-
-- `--headless` untuk menjalankan browser tanpa UI (SSO sering butuh mode non-headless).
-- `--idle-timeout-ms` untuk batas idle (default 300000 / 5 menit).
-- `--web-timeout-s` untuk toleransi loading web (default 30 detik).
-- `--manual-only` untuk selalu login manual (tanpa auto-fill kredensial).
-
-Auto-login akan mencoba kredensial terlebih dulu; jika gagal/OTP muncul, akan beralih ke manual login.
 
 ## Catatan
 

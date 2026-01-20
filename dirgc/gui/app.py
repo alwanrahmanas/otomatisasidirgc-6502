@@ -14,7 +14,10 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QDialog,
+    QFrame,
     QPlainTextEdit,
+    QProgressBar,
+    QScrollArea,
     QSpinBox,
     QMessageBox,
     QVBoxLayout,
@@ -41,6 +44,7 @@ from qfluentwidgets import (
     StrongBodyLabel,
     TitleLabel,
     LineEdit,
+    setFontFamilies,
     setTheme,
     setThemeColor,
 )
@@ -56,6 +60,12 @@ from dirgc.settings import (
 GUI_SETTINGS_PATH = os.path.join("config", "gui_settings.json")
 MAX_RECENT_EXCEL = 8
 RESPONSIVE_BREAKPOINT = 980
+BASE_FONT_SIZE = 11
+DEFAULT_FONT_SCALE = 100
+FONT_SCALE_OPTIONS = (100, 110, 120, 125)
+FONT_BASE_PX_PROPERTY = "font_base_px"
+FONT_BASE_PT_PROPERTY = "font_base_pt"
+MUTED_TEXT_COLOR = "#4A4A4A"
 
 
 def load_gui_settings():
@@ -77,8 +87,84 @@ def build_footer_label():
         "Made with ❤️and ☕ - Novanni Indi Pradana - IPDS BPS 6502"
     )
     footer.setAlignment(Qt.AlignCenter)
-    footer.setStyleSheet("color: #6B6B6B;")
+    footer.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
     return footer
+
+
+def build_scroll_area(parent):
+    scroll = QScrollArea(parent)
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    container = QWidget()
+    scroll.setWidget(container)
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(24, 24, 24, 24)
+    layout.setSpacing(16)
+    return scroll, layout
+
+
+def _normalize_font_scale(value):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_FONT_SCALE
+    if value not in FONT_SCALE_OPTIONS:
+        return DEFAULT_FONT_SCALE
+    return value
+
+
+def load_font_scale():
+    data = load_gui_settings()
+    ui_settings = data.get("ui", {})
+    return _normalize_font_scale(ui_settings.get("font_scale"))
+
+
+def save_font_scale(value):
+    data = load_gui_settings()
+    ui_settings = data.get("ui")
+    if not isinstance(ui_settings, dict):
+        ui_settings = {}
+        data["ui"] = ui_settings
+    ui_settings["font_scale"] = _normalize_font_scale(value)
+    save_gui_settings(data)
+
+
+def _apply_font_scale_to_widget(widget, font_scale):
+    base_px = widget.property(FONT_BASE_PX_PROPERTY)
+    base_pt = widget.property(FONT_BASE_PT_PROPERTY)
+    scale_factor = font_scale / 100.0
+    if base_px is None and base_pt is None:
+        font = widget.font()
+        if font.pixelSize() > 0:
+            base_px = int(round(font.pixelSize() / scale_factor))
+            widget.setProperty(FONT_BASE_PX_PROPERTY, base_px)
+        elif font.pointSize() > 0:
+            base_pt = int(round(font.pointSize() / scale_factor))
+            widget.setProperty(FONT_BASE_PT_PROPERTY, base_pt)
+        else:
+            return
+
+    font = widget.font()
+    if base_px is not None:
+        font.setPixelSize(max(8, int(round(base_px * scale_factor))))
+    elif base_pt is not None:
+        font.setPointSize(max(6, int(round(base_pt * scale_factor))))
+    widget.setFont(font)
+
+
+def apply_font_scale(app, font_scale):
+    font_scale = _normalize_font_scale(font_scale)
+    for widget in QApplication.allWidgets():
+        _apply_font_scale_to_widget(widget, font_scale)
+
+    base_size = max(8, int(round(BASE_FONT_SIZE * (font_scale / 100.0))))
+    font = app.font()
+    if font.pixelSize() > 0:
+        font.setPixelSize(base_size)
+    else:
+        font.setPointSize(base_size)
+    app.setFont(font)
 
 
 def apply_app_font(app):
@@ -87,9 +173,11 @@ def apply_app_font(app):
         QFontDatabase.addApplicationFont(font_path)
     families = QFontDatabase().families()
     if "Poppins" in families:
-        app.setFont(QFont("Poppins", 10))
+        font_family = "Poppins"
     else:
-        app.setFont(QFont("Segoe UI Variable", 10))
+        font_family = "Segoe UI Variable"
+    app.setFont(QFont(font_family, BASE_FONT_SIZE))
+    setFontFamilies([font_family, "Segoe UI Variable", "Segoe UI"])
 
 
 @dataclass
@@ -101,6 +189,8 @@ class RunConfig:
     end_row: Optional[int]
     idle_timeout_ms: int
     keep_open: bool
+    dirgc_only: bool
+    edit_nama_alamat: bool
     use_sso: bool
     sso_username: Optional[str]
     sso_password: Optional[str]
@@ -145,6 +235,8 @@ class RunWorker(QThread):
                 idle_timeout_ms=self._config.idle_timeout_ms,
                 web_timeout_s=self._config.web_timeout_s,
                 keep_open=self._config.keep_open,
+                dirgc_only=self._config.dirgc_only,
+                edit_nama_alamat=self._config.edit_nama_alamat,
                 credentials=credentials,
                 stop_event=self._stop_event,
                 progress_callback=self._emit_progress,
@@ -179,9 +271,11 @@ class RunPage(QWidget):
         self._sso_page = sso_page
         self._recent_excels = []
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        scroll, layout = build_scroll_area(self)
+        outer_layout.addWidget(scroll)
 
         title = TitleLabel("Run DIRGC")
         subtitle = BodyLabel("Atur file, opsi, lalu jalankan proses.")
@@ -277,6 +371,62 @@ class RunPage(QWidget):
         card_layout = QVBoxLayout(card)
         card_layout.addWidget(SubtitleLabel("Options"))
 
+        self.dirgc_only_switch = SwitchButton()
+        self.dirgc_only_switch.setChecked(False)
+        self.dirgc_only_switch.checkedChanged.connect(
+            self._toggle_dirgc_only
+        )
+        card_layout.addWidget(
+            self._make_option_row(
+                "Hanya sampai halaman DIRGC",
+                "ON: login lalu berhenti di halaman DIRGC tanpa filter/input.",
+                self.dirgc_only_switch,
+            )
+        )
+
+        self.edit_nama_alamat_switch = SwitchButton()
+        self.edit_nama_alamat_switch.setChecked(False)
+        card_layout.addWidget(
+            self._make_option_row(
+                "Edit Nama/Alamat Usaha dari Excel",
+                "ON: aktifkan toggle edit di popup dan isi dari data Excel.",
+                self.edit_nama_alamat_switch,
+            )
+        )
+
+        range_row = QWidget()
+        range_layout = QHBoxLayout(range_row)
+        range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.setSpacing(8)
+
+        self.range_switch = SwitchButton()
+        self.range_switch.setChecked(False)
+        self.range_switch.checkedChanged.connect(self._toggle_range)
+        range_layout.addWidget(StrongBodyLabel("Batasi baris Excel"))
+        range_layout.addStretch()
+        range_layout.addWidget(self.range_switch)
+        card_layout.addWidget(range_row)
+
+        range_inputs = QWidget()
+        range_inputs_layout = QHBoxLayout(range_inputs)
+        range_inputs_layout.setContentsMargins(0, 0, 0, 0)
+        range_inputs_layout.setSpacing(12)
+
+        self.start_spin = QSpinBox()
+        self.start_spin.setRange(1, 1000000)
+        self.start_spin.setValue(1)
+        self.end_spin = QSpinBox()
+        self.end_spin.setRange(1, 1000000)
+        self.end_spin.setValue(1)
+
+        range_inputs_layout.addWidget(BodyLabel("Start row"))
+        range_inputs_layout.addWidget(self.start_spin)
+        range_inputs_layout.addSpacing(12)
+        range_inputs_layout.addWidget(BodyLabel("End row"))
+        range_inputs_layout.addWidget(self.end_spin)
+        range_inputs_layout.addStretch()
+        card_layout.addWidget(range_inputs)
+
         self.manual_switch = SwitchButton()
         self.manual_switch.setChecked(False)
         card_layout.addWidget(
@@ -316,7 +466,7 @@ class RunPage(QWidget):
         idle_hint = CaptionLabel(
             "Jika tidak ada aktivitas, proses dihentikan otomatis."
         )
-        idle_hint.setStyleSheet("color: #6B6B6B;")
+        idle_hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
         idle_hint.setWordWrap(True)
         self.idle_spin = QSpinBox()
         self.idle_spin.setRange(30, 3600 * 6)
@@ -325,7 +475,7 @@ class RunPage(QWidget):
         idle_text = QWidget()
         idle_text_layout = QVBoxLayout(idle_text)
         idle_text_layout.setContentsMargins(0, 0, 0, 0)
-        idle_text_layout.setSpacing(2)
+        idle_text_layout.setSpacing(4)
         idle_text_layout.addWidget(idle_label)
         idle_text_layout.addWidget(idle_hint)
         idle_layout.addWidget(idle_text, stretch=1)
@@ -342,13 +492,13 @@ class RunPage(QWidget):
         web_hint = CaptionLabel(
             "Naikkan jika koneksi lambat atau halaman sering timeout."
         )
-        web_hint.setStyleSheet("color: #6B6B6B;")
+        web_hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
         web_hint.setWordWrap(True)
 
         web_text = QWidget()
         web_text_layout = QVBoxLayout(web_text)
         web_text_layout.setContentsMargins(0, 0, 0, 0)
-        web_text_layout.setSpacing(2)
+        web_text_layout.setSpacing(4)
         web_text_layout.addWidget(web_label)
         web_text_layout.addWidget(web_hint)
 
@@ -362,40 +512,7 @@ class RunPage(QWidget):
         web_layout.addWidget(self.web_timeout_spin)
         card_layout.addWidget(web_row)
 
-        range_row = QWidget()
-        range_layout = QHBoxLayout(range_row)
-        range_layout.setContentsMargins(0, 0, 0, 0)
-        range_layout.setSpacing(8)
-
-        self.range_switch = SwitchButton()
-        self.range_switch.setChecked(False)
-        self.range_switch.checkedChanged.connect(self._toggle_range)
-        range_layout.addWidget(StrongBodyLabel("Batasi baris Excel"))
-        range_layout.addStretch()
-        range_layout.addWidget(self.range_switch)
-        card_layout.addWidget(range_row)
-
-        range_inputs = QWidget()
-        range_inputs_layout = QHBoxLayout(range_inputs)
-        range_inputs_layout.setContentsMargins(0, 0, 0, 0)
-        range_inputs_layout.setSpacing(12)
-
-        self.start_spin = QSpinBox()
-        self.start_spin.setRange(1, 1000000)
-        self.start_spin.setValue(1)
-        self.end_spin = QSpinBox()
-        self.end_spin.setRange(1, 1000000)
-        self.end_spin.setValue(1)
-
-        range_inputs_layout.addWidget(BodyLabel("Start row"))
-        range_inputs_layout.addWidget(self.start_spin)
-        range_inputs_layout.addSpacing(12)
-        range_inputs_layout.addWidget(BodyLabel("End row"))
-        range_inputs_layout.addWidget(self.end_spin)
-        range_inputs_layout.addStretch()
-        card_layout.addWidget(range_inputs)
-
-        self._toggle_range()
+        self._toggle_dirgc_only()
 
         return card
 
@@ -420,9 +537,14 @@ class RunPage(QWidget):
 
         self.status_label = BodyLabel("Status: idle")
         self.progress_label = CaptionLabel("Progress: -")
-        self.progress_label.setStyleSheet("color: #6B6B6B;")
+        self.progress_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
         card_layout.addWidget(self.status_label)
         card_layout.addWidget(self.progress_label)
+        card_layout.addWidget(self.progress_bar)
         card_layout.addWidget(button_row)
 
         return card
@@ -460,12 +582,12 @@ class RunPage(QWidget):
         text_block = QWidget()
         text_layout = QVBoxLayout(text_block)
         text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(2)
+        text_layout.setSpacing(4)
 
         title_label = StrongBodyLabel(title)
         desc_label = CaptionLabel(description)
         desc_label.setWordWrap(True)
-        desc_label.setStyleSheet("color: #6B6B6B;")
+        desc_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
 
         text_layout.addWidget(title_label)
         text_layout.addWidget(desc_label)
@@ -557,6 +679,12 @@ class RunPage(QWidget):
             self.headless_switch.setChecked(bool(options["headless"]))
         if "keep_open" in options:
             self.keep_open_switch.setChecked(bool(options["keep_open"]))
+        if "dirgc_only" in options:
+            self.dirgc_only_switch.setChecked(bool(options["dirgc_only"]))
+        if "edit_nama_alamat" in options:
+            self.edit_nama_alamat_switch.setChecked(
+                bool(options["edit_nama_alamat"])
+            )
         if "idle_timeout_s" in options:
             self.idle_spin.setValue(int(options["idle_timeout_s"]))
         if "web_timeout_s" in options:
@@ -568,7 +696,7 @@ class RunPage(QWidget):
         if "end_row" in options:
             self.end_spin.setValue(int(options["end_row"]))
 
-        self._toggle_range()
+        self._toggle_dirgc_only()
 
     def _save_settings(self):
         data = load_gui_settings()
@@ -578,6 +706,8 @@ class RunPage(QWidget):
             "manual_only": self.manual_switch.isChecked(),
             "headless": self.headless_switch.isChecked(),
             "keep_open": self.keep_open_switch.isChecked(),
+            "dirgc_only": self.dirgc_only_switch.isChecked(),
+            "edit_nama_alamat": self.edit_nama_alamat_switch.isChecked(),
             "idle_timeout_s": self.idle_spin.value(),
             "web_timeout_s": self.web_timeout_spin.value(),
             "range_enabled": self.range_switch.isChecked(),
@@ -587,9 +717,28 @@ class RunPage(QWidget):
         save_gui_settings(data)
 
     def _toggle_range(self):
-        enabled = self.range_switch.isChecked()
+        if hasattr(self, "dirgc_only_switch") and self.dirgc_only_switch.isChecked():
+            enabled = False
+        else:
+            enabled = self.range_switch.isChecked()
         self.start_spin.setEnabled(enabled)
         self.end_spin.setEnabled(enabled)
+
+    def _toggle_dirgc_only(self):
+        enabled = not self.dirgc_only_switch.isChecked()
+        for widget in [
+            self.excel_input,
+            self.excel_browse,
+            self.recent_combo,
+            self.range_switch,
+            self.edit_nama_alamat_switch,
+        ]:
+            widget.setEnabled(enabled)
+        if enabled:
+            self._toggle_range()
+        else:
+            self.start_spin.setEnabled(False)
+            self.end_spin.setEnabled(False)
 
 
     def _clear_log(self):
@@ -660,6 +809,8 @@ class RunPage(QWidget):
             idle_timeout_ms=self.idle_spin.value() * 1000,
             web_timeout_s=self.web_timeout_spin.value(),
             keep_open=self.keep_open_switch.isChecked(),
+            dirgc_only=self.dirgc_only_switch.isChecked(),
+            edit_nama_alamat=self.edit_nama_alamat_switch.isChecked(),
             use_sso=use_sso,
             sso_username=sso_username,
             sso_password=sso_password,
@@ -672,12 +823,13 @@ class RunPage(QWidget):
             self._show_error(str(exc))
             return False
 
-        if not config.excel_file:
-            self._show_error("Excel file belum dipilih.")
-            return False
-        if not os.path.exists(config.excel_file):
-            self._show_error("Excel file tidak ditemukan.")
-            return False
+        if not config.dirgc_only:
+            if not config.excel_file:
+                self._show_error("Excel file belum dipilih.")
+                return False
+            if not os.path.exists(config.excel_file):
+                self._show_error("Excel file tidak ditemukan.")
+                return False
 
         if config.use_sso:
             if config.manual_only:
@@ -710,6 +862,7 @@ class RunPage(QWidget):
         self.status_label.setText("Status: running")
         self._set_running_state(True)
         self.progress_label.setText("Progress: memuat data...")
+        self._set_progress_loading()
         self._append_log("=== START RUN ===")
 
         self._worker = RunWorker(config)
@@ -746,6 +899,8 @@ class RunPage(QWidget):
         self._append_log("=== RUN FINISHED ===")
         self.status_label.setText("Status: idle")
         self._set_running_state(False)
+        self.progress_label.setText("Progress: -")
+        self._reset_progress()
         InfoBar.success(
             title="Run selesai",
             content="Proses selesai tanpa error.",
@@ -761,6 +916,8 @@ class RunPage(QWidget):
         self._append_log(f"ERROR: {message}")
         self.status_label.setText("Status: error")
         self._set_running_state(False)
+        self.progress_label.setText("Progress: -")
+        self._reset_progress()
         InfoBar.error(
             title="Run gagal",
             content=message,
@@ -773,6 +930,8 @@ class RunPage(QWidget):
         self._append_log("=== RUN STOPPED ===")
         self.status_label.setText("Status: idle")
         self._set_running_state(False)
+        self.progress_label.setText("Progress: -")
+        self._reset_progress()
         InfoBar.warning(
             title="Run dihentikan",
             content="Proses dihentikan oleh pengguna.",
@@ -784,11 +943,25 @@ class RunPage(QWidget):
     def _update_progress(self, processed, total, excel_row):
         if total <= 0:
             self.progress_label.setText("Progress: -")
+            self._set_progress_loading()
             return
         text = f"Progress: {processed}/{total}"
         if excel_row and excel_row > 0:
             text = f"{text} | Baris Excel {excel_row}"
         self.progress_label.setText(text)
+        self.progress_bar.setRange(0, int(total))
+        value = min(max(int(processed), 0), int(total))
+        self.progress_bar.setValue(value)
+
+    def _set_progress_loading(self):
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setValue(0)
+
+    def _reset_progress(self):
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
 
     def _show_error(self, message):
         InfoBar.error(
@@ -822,6 +995,8 @@ class RunPage(QWidget):
             self.manual_switch,
             self.headless_switch,
             self.keep_open_switch,
+            self.dirgc_only_switch,
+            self.edit_nama_alamat_switch,
             self.idle_spin,
             self.web_timeout_spin,
             self.range_switch,
@@ -831,7 +1006,7 @@ class RunPage(QWidget):
             widget.setEnabled(enabled)
 
         if enabled:
-            self._toggle_range()
+            self._toggle_dirgc_only()
             self._sync_sso_state()
         else:
             self.start_spin.setEnabled(False)
@@ -865,9 +1040,11 @@ class RunPage(QWidget):
 class HomePage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        scroll, layout = build_scroll_area(self)
+        outer_layout.addWidget(scroll)
 
         hero_card = CardWidget()
         hero_layout = QHBoxLayout(hero_card)
@@ -910,6 +1087,7 @@ class HomePage(QWidget):
 
         steps_card = CardWidget()
         steps_layout = QVBoxLayout(steps_card)
+        steps_layout.setSpacing(6)
         steps_layout.addWidget(SubtitleLabel("Cara Pakai Singkat"))
 
         steps = [
@@ -935,13 +1113,14 @@ class HomePage(QWidget):
             title_label = StrongBodyLabel(title_text)
             desc_label = CaptionLabel(desc_text)
             desc_label.setWordWrap(True)
-            desc_label.setStyleSheet("color: #6B6B6B;")
+            desc_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
             steps_layout.addWidget(title_label)
             steps_layout.addWidget(desc_label)
         layout.addWidget(steps_card)
 
         notes_card = CardWidget()
         notes_layout = QVBoxLayout(notes_card)
+        notes_layout.setSpacing(6)
         notes_layout.addWidget(SubtitleLabel("Keterangan Opsi"))
 
         notes = [
@@ -956,6 +1135,14 @@ class HomePage(QWidget):
             (
                 "Biarkan browser tetap terbuka",
                 "ON: browser tetap terbuka setelah proses selesai.",
+            ),
+            (
+                "Hanya sampai halaman DIRGC",
+                "ON: berhenti di halaman DIRGC tanpa filter/input dari Excel.",
+            ),
+            (
+                "Edit Nama/Alamat Usaha dari Excel",
+                "ON: aktifkan toggle edit di popup dan isi dari data Excel.",
             ),
             (
                 "Batas idle (detik)",
@@ -974,7 +1161,7 @@ class HomePage(QWidget):
             title_label = StrongBodyLabel(title_text)
             desc_label = CaptionLabel(desc_text)
             desc_label.setWordWrap(True)
-            desc_label.setStyleSheet("color: #6B6B6B;")
+            desc_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
             notes_layout.addWidget(title_label)
             notes_layout.addWidget(desc_label)
         layout.addWidget(notes_card)
@@ -985,9 +1172,11 @@ class HomePage(QWidget):
 class SsoPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        scroll, layout = build_scroll_area(self)
+        outer_layout.addWidget(scroll)
 
         title = TitleLabel("Akun SSO")
         subtitle = BodyLabel(
@@ -1040,11 +1229,11 @@ class SsoPage(QWidget):
         text_block = QWidget()
         text_layout = QVBoxLayout(text_block)
         text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(2)
+        text_layout.setSpacing(4)
         text_layout.addWidget(StrongBodyLabel(text))
         hint = CaptionLabel(description)
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #6B6B6B;")
+        hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
         text_layout.addWidget(hint)
 
         row_layout.addWidget(text_block, stretch=1)
@@ -1071,11 +1260,78 @@ class SsoPage(QWidget):
         self._toggle_fields()
 
 
+class SettingsPage(QWidget):
+    def __init__(self, app, parent=None):
+        super().__init__(parent)
+        self._app = app
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        scroll, layout = build_scroll_area(self)
+        outer_layout.addWidget(scroll)
+
+        title = TitleLabel("Settings")
+        subtitle = BodyLabel("Atur tampilan aplikasi sesuai kebutuhan.")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        appearance_card = CardWidget()
+        appearance_layout = QVBoxLayout(appearance_card)
+        appearance_layout.addWidget(SubtitleLabel("Tampilan"))
+
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(12)
+
+        text_block = QWidget()
+        text_layout = QVBoxLayout(text_block)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(4)
+        text_layout.addWidget(StrongBodyLabel("Ukuran font"))
+        desc_label = CaptionLabel(
+            "Pilih 100/110/120/125% untuk memperbesar teks."
+        )
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        text_layout.addWidget(desc_label)
+
+        self.font_combo = ComboBox()
+        for scale in FONT_SCALE_OPTIONS:
+            self.font_combo.addItem(f"{scale}%")
+        current_scale = load_font_scale()
+        index = self.font_combo.findText(f"{current_scale}%")
+        if index >= 0:
+            self.font_combo.setCurrentIndex(index)
+
+        row_layout.addWidget(text_block, stretch=1)
+        row_layout.addWidget(self.font_combo)
+        appearance_layout.addWidget(row)
+        layout.addWidget(appearance_card)
+        layout.addStretch()
+        layout.addWidget(build_footer_label())
+
+        self.font_combo.currentIndexChanged.connect(
+            self._apply_font_scale
+        )
+
+    def _apply_font_scale(self):
+        text = self.font_combo.currentText().strip()
+        text = text.replace("%", "")
+        scale = _normalize_font_scale(text)
+        save_font_scale(scale)
+        apply_font_scale(self._app, scale)
+
+
 class PlaceholderPage(QWidget):
     def __init__(self, title, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        scroll, layout = build_scroll_area(self)
+        outer_layout.addWidget(scroll)
         layout.addWidget(TitleLabel(title))
         layout.addWidget(BodyLabel("Halaman ini akan diisi di iterasi berikutnya."))
         layout.addStretch()
@@ -1083,8 +1339,9 @@ class PlaceholderPage(QWidget):
 
 
 class MainWindow(FluentWindow):
-    def __init__(self):
+    def __init__(self, app):
         super().__init__()
+        self._app = app
 
         self.setWindowTitle("DIRGC Automation")
         self.resize(1100, 720)
@@ -1092,7 +1349,7 @@ class MainWindow(FluentWindow):
         self.home_page = HomePage(self)
         self.sso_page = SsoPage(self)
         self.run_page = RunPage(self.sso_page, self)
-        self.settings_page = PlaceholderPage("Settings", self)
+        self.settings_page = SettingsPage(self._app, self)
         self.home_page.setObjectName("home_page")
         self.run_page.setObjectName("run_page")
         self.sso_page.setObjectName("sso_page")
@@ -1120,7 +1377,8 @@ def main():
     setTheme(Theme.LIGHT)
     setThemeColor("#0078D4")
 
-    window = MainWindow()
+    window = MainWindow(app)
+    apply_font_scale(app, load_font_scale())
     window.show()
     sys.exit(app.exec_())
 

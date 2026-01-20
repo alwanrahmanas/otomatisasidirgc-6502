@@ -1,3 +1,4 @@
+import re
 import time
 
 from .logging_utils import log_info, log_warn
@@ -396,6 +397,14 @@ def apply_filter(page, monitor, idsbr, nama_usaha, alamat):
     return search_with("", nama_usaha, alamat)
 
 
+def _normalize_hasil_label(text):
+    if text is None:
+        return ""
+    cleaned = " ".join(str(text).split())
+    cleaned = re.sub(r"^\\d+\\s*[\\.\\)\\-:]\\s*", "", cleaned)
+    return cleaned.strip().lower()
+
+
 def hasil_gc_select(page, monitor, code):
     if code is None:
         return False
@@ -403,12 +412,49 @@ def hasil_gc_select(page, monitor, code):
         lambda: page.locator("#tt_hasil_gc").count() > 0, timeout_s=15
     )
     select_locator = page.locator("#tt_hasil_gc")
-    value_locator = select_locator.locator(f'option[value="{code}"]')
-    if value_locator.count() > 0:
-        monitor.bot_select_option("#tt_hasil_gc", value=str(code))
-        return True
+    try:
+        options = select_locator.locator("option").evaluate_all(
+            "elements => elements.map(e => ({ value: e.value, text: e.textContent || '' }))"
+        )
+    except Exception:
+        options = []
+
+    code_value = str(code)
+    if options:
+        if any(opt.get("value") == code_value for opt in options):
+            monitor.bot_select_option("#tt_hasil_gc", value=code_value)
+            return True
+    else:
+        value_locator = select_locator.locator(f'option[value="{code}"]')
+        if value_locator.count() > 0:
+            monitor.bot_select_option("#tt_hasil_gc", value=code_value)
+            return True
+
     label = HASIL_GC_LABELS.get(code)
+    if label and options:
+        target_norm = _normalize_hasil_label(label)
+        matched_value = None
+        for opt in options:
+            opt_text = opt.get("text", "")
+            if _normalize_hasil_label(opt_text) == target_norm:
+                matched_value = opt.get("value")
+                break
+        if matched_value is None:
+            for opt in options:
+                opt_text = opt.get("text", "")
+                if target_norm and target_norm in _normalize_hasil_label(
+                    opt_text
+                ):
+                    matched_value = opt.get("value")
+                    break
+        if matched_value is not None:
+            monitor.bot_select_option("#tt_hasil_gc", value=matched_value)
+            return True
+
     if label:
-        monitor.bot_select_option("#tt_hasil_gc", label=label)
-        return True
+        try:
+            monitor.bot_select_option("#tt_hasil_gc", label=label)
+            return True
+        except Exception:
+            return False
     return False
