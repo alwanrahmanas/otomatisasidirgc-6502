@@ -1,5 +1,6 @@
 import math
 import os
+import re
 
 from .settings import (
     DEFAULT_EXCEL_FILE,
@@ -16,13 +17,15 @@ def normalize_text(value):
             return ""
         if value.is_integer():
             return str(int(value))
-    return str(value).strip()
+    text = str(value)
+    text = re.sub(r"_x000d_", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"_x000a_", " ", text, flags=re.IGNORECASE)
+    text = text.replace("\r", " ").replace("\n", " ")
+    return text.strip()
 
 
 def normalize_header(value):
-    if value is None:
-        return ""
-    text = str(value).strip().lower()
+    text = normalize_text(value).lower()
     if not text:
         return ""
     return " ".join(text.split())
@@ -45,9 +48,10 @@ def normalize_lat_lon(value, min_value, max_value):
     if value is None:
         return ""
     if isinstance(value, str):
-        value = value.strip()
+        value = normalize_text(value)
         if not value:
             return ""
+        value = value.replace(",", ".")
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -69,7 +73,10 @@ def normalize_code(value):
     if isinstance(value, (int, float)):
         return int(value)
     try:
-        return int(str(value).strip())
+        cleaned = normalize_text(value)
+        if not cleaned:
+            return None
+        return int(cleaned)
     except ValueError:
         return None
 
