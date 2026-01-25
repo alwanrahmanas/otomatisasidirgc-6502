@@ -9,7 +9,7 @@ from .excel import load_excel_rows
 from .logging_utils import log_error, log_info, log_warn
 from .matching import select_matching_card
 from .run_logs import build_run_log_path, write_run_log
-from .settings import TARGET_URL
+from .settings import RUN_LOG_CHECKPOINT_EVERY, TARGET_URL
 
 
 def process_excel_rows(
@@ -118,6 +118,32 @@ def process_excel_rows(
         except Exception:
             pass
 
+    stop_reason = None
+    idle_reason = None
+    checkpoint_every = int(RUN_LOG_CHECKPOINT_EVERY or 0)
+    last_checkpoint = 0
+
+    def checkpoint_run_log(force=False):
+        nonlocal last_checkpoint
+        if not run_log_rows:
+            return
+        if checkpoint_every <= 0 and not force:
+            return
+        if (
+            checkpoint_every > 0
+            and not force
+            and len(run_log_rows) - last_checkpoint < checkpoint_every
+        ):
+            return
+        write_run_log(run_log_rows, run_log_path)
+        last_checkpoint = len(run_log_rows)
+        if not force:
+            log_info(
+                "Run log checkpoint saved.",
+                rows=last_checkpoint,
+                path=str(run_log_path),
+            )
+
     for offset, row in enumerate(rows):
         batch_index = offset + 1
         excel_row = start_row + offset
@@ -125,6 +151,7 @@ def process_excel_rows(
         status = None
         note = ""
         extra_notes = []
+        stop_processing = False
 
         idsbr = row["idsbr"]
         nama_usaha = row["nama_usaha"]
@@ -194,14 +221,15 @@ def process_excel_rows(
             row_excel=excel_row,
             idsbr=idsbr or "-",
         )
-        ensure_on_dirgc(
-            page,
-            monitor=monitor,
-            use_saved_credentials=use_saved_credentials,
-            credentials=credentials,
-        )
 
         try:
+            monitor.idle_check()
+            ensure_on_dirgc(
+                page,
+                monitor=monitor,
+                use_saved_credentials=use_saved_credentials,
+                credentials=credentials,
+            )
             if update_mode:
                 missing_fields = []
                 lat_text = (latitude or "").strip()
@@ -681,13 +709,37 @@ def process_excel_rows(
             status = "berhasil"
             note = "Submit sukses"
         except Exception as exc:
-            log_error(
-                "Error while processing row.",
-                idsbr=idsbr or "-",
-                error=str(exc),
-            )
-            status = "error"
-            note = str(exc)
+            message = str(exc)
+            if "Run stopped by user." in message:
+                log_warn(
+                    "Run stopped by user.",
+                    idsbr=idsbr or "-",
+                    row=batch_index,
+                    reason=message,
+                )
+                status = "stopped"
+                note = message
+                stop_reason = message
+                stop_processing = True
+            elif "Idle timeout reached" in message:
+                log_warn(
+                    "Idle timeout reached; stopping run.",
+                    idsbr=idsbr or "-",
+                    row=batch_index,
+                    reason=message,
+                )
+                status = "error"
+                note = message
+                idle_reason = message
+                stop_processing = True
+            else:
+                log_error(
+                    "Error while processing row.",
+                    idsbr=idsbr or "-",
+                    error=message,
+                )
+                status = "error"
+                note = message
         finally:
             combined_note = note or ""
             if extra_notes:
@@ -745,7 +797,30 @@ def process_excel_rows(
                     )
                 except Exception:
                     pass
+            checkpoint_run_log()
+        if stop_processing:
+            checkpoint_run_log(force=True)
+            break
 
-    log_info("Processing completed.", _spacer=True, _divider=True, **stats)
-    write_run_log(run_log_rows, run_log_path)
+    if stop_reason:
+        log_warn(
+            "Processing stopped by user.",
+            _spacer=True,
+            _divider=True,
+            **stats,
+        )
+    elif idle_reason:
+        log_warn(
+            "Processing stopped due to idle timeout.",
+            _spacer=True,
+            _divider=True,
+            **stats,
+        )
+    else:
+        log_info("Processing completed.", _spacer=True, _divider=True, **stats)
+    checkpoint_run_log(force=True)
     log_info("Run log saved.", path=str(run_log_path))
+    if stop_reason:
+        raise RuntimeError(stop_reason)
+    if idle_reason:
+        raise RuntimeError(idle_reason)

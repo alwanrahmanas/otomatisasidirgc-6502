@@ -1,6 +1,7 @@
 import re
 import time
 
+from playwright.sync_api import TimeoutError as PWTimeoutError
 from .logging_utils import log_info, log_warn
 from .settings import (
     AUTO_LOGIN_RESULT_TIMEOUT_S,
@@ -19,10 +20,14 @@ class ActivityMonitor:
         self.idle_timeout_s = idle_timeout_ms / 1000
         self.last_activity = time.monotonic()
         self.stop_event = stop_event
+        self._stop_logged = False
         self.timeout_scale = timeout_scale if timeout_scale and timeout_scale > 0 else 1.0
 
     def _check_stop(self):
         if self.stop_event and self.stop_event.is_set():
+            if not self._stop_logged:
+                self._stop_logged = True
+                log_warn("Run stopped by user.")
             raise RuntimeError("Run stopped by user.")
 
     def mark_activity(self, _reason=None):
@@ -40,7 +45,7 @@ class ActivityMonitor:
             return None
         return timeout_s * self.timeout_scale
 
-    def wait_for_condition(self, condition, timeout_s=None, poll_ms=500):
+    def wait_for_condition(self, condition, timeout_s=None, poll_ms=1500):
         timeout_s = self.scale_timeout(timeout_s)
         start = time.monotonic()
         while True:
@@ -72,7 +77,7 @@ class ActivityMonitor:
     def bot_goto(self, url):
         self._check_stop()
         self.mark_activity("bot")
-        self.page.goto(url, wait_until="domcontentloaded")
+        self.page.goto(url, wait_until="commit")
 
 
 def install_user_activity_tracking(page, mark_activity):
@@ -206,7 +211,8 @@ def ensure_on_dirgc(
     autofill_attempted = False
     username, password = credentials or (None, None)
 
-    monitor.bot_goto(TARGET_URL)
+    if not is_on_target():
+        monitor.bot_goto(TARGET_URL)
 
     while True:
         if is_on_target():
@@ -367,7 +373,22 @@ def apply_filter(page, monitor, idsbr, nama_usaha, alamat):
 
     def search_with(idsbr_value, nama_value, alamat_value):
         previous_snapshot = get_results_snapshot()
-        set_filter_values(idsbr_value, nama_value, alamat_value)
+        def is_gc_card(resp):
+            return (
+                "matchapro.web.bps.go.id/direktori-usaha/data-gc-card" in resp.url
+                and resp.request.method == "POST"
+                and resp.status == 200
+            )
+
+        try:
+            with page.expect_response(is_gc_card, timeout=5000):
+                set_filter_values(idsbr_value, nama_value, alamat_value)
+        except PWTimeoutError:
+            # Response not observed; fall back to DOM-based waiting.
+            pass
+        except Exception:
+            pass
+
         monitor.wait_for_condition(lambda: False, timeout_s=0.5)
         return wait_for_results(previous_snapshot)
 

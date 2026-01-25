@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -13,6 +14,9 @@ from .settings import (
     DEFAULT_EXCEL_FILE,
     DEFAULT_IDLE_TIMEOUT_MS,
     DEFAULT_WEB_TIMEOUT_S,
+    BLOCK_RESOURCE_DOMAINS,
+    BLOCK_RESOURCE_TYPES,
+    ENABLE_RESOURCE_BLOCKING,
 )
 
 
@@ -192,41 +196,51 @@ def run_dirgc(
                 "Sec-Ch-Ua": '"Android WebView";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
                 "Sec-Ch-Ua-Mobile": "?1",
                 "Sec-Ch-Ua-Platform": '"Android"',
-                "X-Requested-With": "com.matchapro.app"
             },
             java_script_enabled=True,
             permissions=["geolocation"]
         )
+        if ENABLE_RESOURCE_BLOCKING and (BLOCK_RESOURCE_TYPES or BLOCK_RESOURCE_DOMAINS):
+            def _route_handler(route):
+                domain = urlparse(route.request.url).netloc.lower()
+                if domain in BLOCK_RESOURCE_DOMAINS:
+                    route.abort()
+                    return
+                if route.request.resource_type in BLOCK_RESOURCE_TYPES:
+                    route.abort()
+                else:
+                    route.continue_()
+
+            context.route("**/*", _route_handler)
         page = context.new_page()
         page.set_default_timeout(web_timeout_s * 1000)
         page.set_default_navigation_timeout(web_timeout_s * 1000)
-        
-        # STEALTH SCRIPTS - HAPUS SEMUA DETECTION FLAGS
-        page.add_init_script("""
-            // Hapus webdriver flag
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            
-            // Override Chrome detection
-            window.chrome = {runtime: {}};
-            
-            // Permissions & languages Android
-            Object.defineProperty(navigator, 'permissions', {
-                get: () => ({query: () => Promise.resolve({state: 'granted'})})});
-            
-            // Plugins empty (mobile)
-            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-            
-            // Languages Indonesia
-            Object.defineProperty(navigator, 'languages', {get: () => ['id-ID', 'id', 'en-US', 'en']});
-            
-            // WebGL fingerprint spoof
-            const getParameter = WebGLRenderingContext.getParameter;
-            WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                if (parameter === 37445) return 'Intel Inc.';
-                if (parameter === 37446) return 'Intel(R) UHD Graphics 630';
-                return getParameter(parameter);
-            };
+        def speed_route(route, request):
+            rt = request.resource_type
+            url = request.url
+
+            # block heavy third-party + visual assets
+            if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
+                return route.abort()
+            if rt in ("image", "font", "media"):
+                return route.abort()
+
+            return route.continue_()
+
+        page.route("**/*", speed_route)
+
+        context.add_init_script("""
+            // Anti-redefine conflict
+            (function() {
+                if (navigator.webdriver !== undefined) {
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                }
+                window.chrome = {runtime: {}};
+                Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                Object.defineProperty(navigator, 'languages', {get: () => ['id-ID','en']});
+            })();
         """)
+
 
         monitor = ActivityMonitor(
             page,
