@@ -1,4 +1,6 @@
 from .browser import (
+    SUBMIT_POST_SUCCESS_DELAY_S,
+    SUBMIT_RATE_LIMITER,
     apply_filter,
     ensure_on_dirgc,
     hasil_gc_select,
@@ -10,6 +12,48 @@ from .logging_utils import log_error, log_info, log_warn
 from .matching import select_matching_card
 from .run_logs import build_run_log_path, write_run_log
 from .settings import RUN_LOG_CHECKPOINT_EVERY, TARGET_URL
+
+
+RATE_LIMIT_POPUP_MARKERS = (
+    "something wrong",
+    "something went wrong",
+    "too many request",
+    "too many requests",
+    "terlalu banyak permintaan",
+    "429",
+    "limit",
+    "batas permintaan",
+)
+
+
+def detect_rate_limit_popup_text(page):
+    try:
+        return (
+            page.evaluate(
+                """
+                (markers) => {
+                  const lowered = markers.map((item) => (item || "").toLowerCase());
+                  const popups = Array.from(document.querySelectorAll(".swal2-popup"));
+                  for (const popup of popups) {
+                    const style = window.getComputedStyle(popup);
+                    const hidden = style.display === "none" || style.visibility === "hidden";
+                    const rect = popup.getBoundingClientRect();
+                    const invisible = rect.width === 0 && rect.height === 0;
+                    if (hidden || invisible) continue;
+                    const text = (popup.innerText || "").toLowerCase();
+                    if (lowered.some((marker) => marker && text.includes(marker))) {
+                      return popup.innerText || "";
+                    }
+                  }
+                  return "";
+                }
+                """,
+                list(RATE_LIMIT_POPUP_MARKERS),
+            )
+            or ""
+        )
+    except Exception:
+        return ""
 
 
 def process_excel_rows(
@@ -577,6 +621,7 @@ def process_excel_rows(
                 monitor.bot_goto(TARGET_URL)
                 continue
 
+            SUBMIT_RATE_LIMITER.wait_for_slot(monitor)
             wait_for_block_ui_clear(page, monitor, timeout_s=15)
             try:
                 submit_locator.first.scroll_into_view_if_needed()
@@ -598,9 +643,44 @@ def process_excel_rows(
             confirm_text = "tanpa melakukan geotag"
             success_text = "Data submitted successfully"
             swal_result = None
+            rate_limit_info = {"text": ""}
+
+            def capture_rate_limit():
+                rate_text = detect_rate_limit_popup_text(page).strip()
+                if rate_text:
+                    rate_limit_info["text"] = rate_text
+                    return True
+                return False
+
+            def handle_rate_limit_abort():
+                wait_penalty = SUBMIT_RATE_LIMITER.penalize()
+                log_warn(
+                    "Server menolak submit; kemungkinan rate limit.",
+                    idsbr=idsbr or "-",
+                    wait_s=round(wait_penalty, 1),
+                    message=rate_limit_info["text"],
+                )
+                try:
+                    popup_locator = page.locator(".swal2-popup")
+                    if rate_limit_info["text"]:
+                        popup_locator = popup_locator.filter(
+                            has_text=rate_limit_info["text"]
+                        )
+                    confirm_btn = popup_locator.locator(".swal2-confirm")
+                    if confirm_btn.count() > 0:
+                        monitor.bot_click(confirm_btn.first)
+                except Exception:
+                    pass
+                monitor.wait_for_condition(
+                    lambda: False, timeout_s=wait_penalty
+                )
+                return wait_penalty
 
             def find_swal():
                 nonlocal swal_result
+                if capture_rate_limit():
+                    swal_result = "rate_limit"
+                    return True
                 confirm_popup = page.locator(
                     ".swal2-popup", has_text=confirm_text
                 )
@@ -622,6 +702,18 @@ def process_excel_rows(
                 return False
 
             monitor.wait_for_condition(find_swal, timeout_s=15)
+
+            if swal_result == "rate_limit":
+                handle_rate_limit_abort()
+                status = "error"
+                detail = rate_limit_info["text"].strip()
+                note = (
+                    "Submit ditolak server (HTTP 429/rate limit)."
+                    if not detail
+                    else f"Submit ditolak server (HTTP 429/rate limit). {detail}"
+                )
+                monitor.bot_goto(TARGET_URL)
+                continue
 
             if swal_result == "confirm":
                 if not latitude_value and not longitude_value:
@@ -657,6 +749,9 @@ def process_excel_rows(
 
                 def find_success():
                     nonlocal swal_result
+                    if capture_rate_limit():
+                        swal_result = "rate_limit"
+                        return True
                     success_popup = page.locator(
                         ".swal2-popup", has_text=success_text
                     )
@@ -675,6 +770,17 @@ def process_excel_rows(
                     )
                     status = "gagal"
                     note = "Dialog sukses tidak muncul"
+                    monitor.bot_goto(TARGET_URL)
+                    continue
+                if swal_result == "rate_limit":
+                    handle_rate_limit_abort()
+                    status = "error"
+                    detail = rate_limit_info["text"].strip()
+                    note = (
+                        "Submit ditolak server (HTTP 429/rate limit)."
+                        if not detail
+                        else f"Submit ditolak server (HTTP 429/rate limit). {detail}"
+                    )
                     monitor.bot_goto(TARGET_URL)
                     continue
 
@@ -706,6 +812,11 @@ def process_excel_rows(
             )
             if not page.url.startswith(TARGET_URL):
                 monitor.bot_goto(TARGET_URL)
+            SUBMIT_RATE_LIMITER.reset_penalty()
+            if SUBMIT_POST_SUCCESS_DELAY_S > 0:
+                monitor.wait_for_condition(
+                    lambda: False, timeout_s=SUBMIT_POST_SUCCESS_DELAY_S
+                )
             status = "berhasil"
             note = "Submit sukses"
         except Exception as exc:

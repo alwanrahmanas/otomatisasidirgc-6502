@@ -80,6 +80,66 @@ class ActivityMonitor:
         self.page.goto(url, wait_until="commit")
 
 
+class RequestRateLimiter:
+    """
+    Simple rate limiter to throttle automated filter submissions.
+
+    DIRGC mulai memunculkan HTTP 429 jika filter ditembak terlalu cepat.
+    Kelas ini menjaga jarak antar request dan menambahkan exponential backoff
+    ketika server sudah menolak permintaan.
+    """
+
+    def __init__(self, min_interval_s=1.2, penalty_initial_s=5, penalty_max_s=40):
+        self.min_interval_s = max(0.1, float(min_interval_s))
+        self.penalty_initial_s = max(0.0, float(penalty_initial_s))
+        self.penalty_max_s = max(self.penalty_initial_s, float(penalty_max_s))
+        self._last_request_ts = 0.0
+        self._pending_penalty_s = 0.0
+        self._last_penalty_s = 0.0
+
+    def wait_for_slot(self, monitor):
+        wait_seconds = 0.0
+        if self._pending_penalty_s > 0:
+            wait_seconds = self._pending_penalty_s
+            self._pending_penalty_s = 0.0
+        now = time.monotonic()
+        if self._last_request_ts > 0:
+            elapsed = now - self._last_request_ts
+            if elapsed < self.min_interval_s:
+                wait_seconds = max(wait_seconds, self.min_interval_s - elapsed)
+        if wait_seconds > 0:
+            monitor.wait_for_condition(lambda: False, timeout_s=wait_seconds)
+        self._last_request_ts = time.monotonic()
+
+    def penalize(self):
+        if self._last_penalty_s <= 0:
+            next_penalty = self.penalty_initial_s
+        else:
+            next_penalty = min(self._last_penalty_s * 2, self.penalty_max_s)
+        self._pending_penalty_s = max(self._pending_penalty_s, next_penalty)
+        self._last_penalty_s = next_penalty
+        return next_penalty
+
+    def reset_penalty(self):
+        self._last_penalty_s = 0.0
+
+
+FILTER_RATE_LIMITER = RequestRateLimiter(
+    min_interval_s=1.5,
+    penalty_initial_s=5,
+    penalty_max_s=45,
+)
+MAX_RATE_LIMIT_RETRIES = 5
+
+
+SUBMIT_RATE_LIMITER = RequestRateLimiter(
+    min_interval_s=2.5,
+    penalty_initial_s=8,
+    penalty_max_s=60,
+)
+SUBMIT_POST_SUCCESS_DELAY_S = 2.5
+
+
 def install_user_activity_tracking(page, mark_activity):
     page.expose_function("reportActivity", lambda: mark_activity("user"))
     page.add_init_script(
@@ -372,25 +432,47 @@ def apply_filter(page, monitor, idsbr, nama_usaha, alamat):
         )
 
     def search_with(idsbr_value, nama_value, alamat_value):
-        previous_snapshot = get_results_snapshot()
-        def is_gc_card(resp):
-            return (
-                "matchapro.web.bps.go.id/direktori-usaha/data-gc-card" in resp.url
-                and resp.request.method == "POST"
-                and resp.status == 200
-            )
+        attempts = 0
 
-        try:
-            with page.expect_response(is_gc_card, timeout=5000):
-                set_filter_values(idsbr_value, nama_value, alamat_value)
-        except PWTimeoutError:
-            # Response not observed; fall back to DOM-based waiting.
-            pass
-        except Exception:
-            pass
+        while True:
+            attempts += 1
+            FILTER_RATE_LIMITER.wait_for_slot(monitor)
+            previous_snapshot = get_results_snapshot()
 
-        monitor.wait_for_condition(lambda: False, timeout_s=0.5)
-        return wait_for_results(previous_snapshot)
+            def is_gc_card(resp):
+                return (
+                    "matchapro.web.bps.go.id/direktori-usaha/data-gc-card" in resp.url
+                    and resp.request.method == "POST"
+                )
+
+            response_obj = None
+            try:
+                with page.expect_response(is_gc_card, timeout=5000) as resp_info:
+                    set_filter_values(idsbr_value, nama_value, alamat_value)
+                response_obj = resp_info.value
+            except PWTimeoutError:
+                response_obj = None
+            except Exception:
+                response_obj = None
+
+            status_code = response_obj.status if response_obj else None
+            if status_code == 429:
+                wait_penalty = FILTER_RATE_LIMITER.penalize()
+                log_warn(
+                    "Server rate limited filter request (HTTP 429).",
+                    attempt=attempts,
+                    wait_s=round(wait_penalty, 1),
+                )
+                if attempts >= MAX_RATE_LIMIT_RETRIES:
+                    raise RuntimeError(
+                        "Server DIRGC terus mengembalikan HTTP 429. "
+                        "Mohon beri jeda beberapa menit sebelum melanjutkan otomatisasi."
+                    )
+                continue
+
+            FILTER_RATE_LIMITER.reset_penalty()
+            monitor.wait_for_condition(lambda: False, timeout_s=0.5)
+            return wait_for_results(previous_snapshot)
 
     if idsbr:
         count = search_with(idsbr, "", "")
