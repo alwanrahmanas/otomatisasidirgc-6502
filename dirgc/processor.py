@@ -1,3 +1,5 @@
+import time
+
 from .browser import (
     SUBMIT_POST_SUCCESS_DELAY_S,
     SUBMIT_RATE_LIMITER,
@@ -54,6 +56,61 @@ def detect_rate_limit_popup_text(page):
         )
     except Exception:
         return ""
+
+
+def _is_swal_overlay_visible(page):
+    try:
+        container = page.locator(".swal2-container")
+        total = container.count()
+    except Exception:
+        return False
+    if total == 0:
+        return False
+    check_total = min(total, 5)
+    for idx in range(check_total):
+        try:
+            current = container.nth(idx)
+            if current.is_visible():
+                aria_hidden = (current.get_attribute("aria-hidden") or "").lower()
+                if aria_hidden != "true":
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def dismiss_swal_overlays(page, monitor, context="", timeout_s=12):
+    deadline = time.monotonic() + timeout_s
+    attempts = 0
+    while True:
+        if not _is_swal_overlay_visible(page):
+            return True
+        attempts += 1
+        popup_locator = page.locator(".swal2-container").locator(".swal2-popup")
+        acted = False
+        for selector in (".swal2-confirm", ".swal2-close", ".swal2-cancel"):
+            button = popup_locator.locator(selector)
+            if button.count() > 0 and button.first.is_enabled():
+                try:
+                    monitor.bot_click(button.first)
+                    acted = True
+                    break
+                except Exception:
+                    continue
+        if not acted:
+            try:
+                page.keyboard.press("Escape")
+                acted = True
+            except Exception:
+                pass
+        monitor.wait_for_condition(lambda: False, timeout_s=0.3)
+        if time.monotonic() >= deadline:
+            log_warn(
+                "Popup SweetAlert tetap terbuka.",
+                context=context or "-",
+                attempts=attempts,
+            )
+            return False
 
 
 def process_excel_rows(
@@ -326,6 +383,18 @@ def process_excel_rows(
             result_count = apply_filter(page, monitor, idsbr, nama_usaha, alamat)
             log_info("Filter results.", count=result_count)
 
+            if not dismiss_swal_overlays(
+                page, monitor, context="pre-select card", timeout_s=10
+            ):
+                log_warn(
+                    "Popup tidak tertutup sebelum pilih kartu; skipping.",
+                    idsbr=idsbr or "-",
+                )
+                status = "error"
+                note = "Popup SweetAlert tertahan sebelum pilih kartu"
+                monitor.bot_goto(TARGET_URL)
+                continue
+
             selection = select_matching_card(
                 page, monitor, idsbr, nama_usaha, alamat
             )
@@ -341,7 +410,19 @@ def process_excel_rows(
                 header_locator.scroll_into_view_if_needed()
             except Exception:
                 pass
-            monitor.bot_click(header_locator)
+            try:
+                monitor.bot_click(header_locator)
+            except Exception as exc:
+                if _is_swal_overlay_visible(page):
+                    dismissed = dismiss_swal_overlays(
+                        page, monitor, context="select card retry", timeout_s=8
+                    )
+                    if dismissed:
+                        monitor.bot_click(header_locator)
+                    else:
+                        raise
+                else:
+                    raise
 
             if card_scope.count() == 0:
                 card_scope = page
