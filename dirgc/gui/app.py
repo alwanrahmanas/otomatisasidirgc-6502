@@ -1213,6 +1213,18 @@ class HomePage(QWidget):
 
         layout.addWidget(hero_card)
 
+        self._content_widget = QWidget()
+        self._content_layout = QBoxLayout(QBoxLayout.LeftToRight)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(16)
+        self._content_widget.setLayout(self._content_layout)
+        layout.addWidget(self._content_widget)
+
+        left_col = QWidget()
+        left_layout = QVBoxLayout(left_col)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(16)
+
         summary_card = CardWidget()
         summary_layout = QVBoxLayout(summary_card)
         summary_layout.addWidget(SubtitleLabel("Ringkasan"))
@@ -1223,7 +1235,7 @@ class HomePage(QWidget):
         )
         summary_text.setWordWrap(True)
         summary_layout.addWidget(summary_text)
-        layout.addWidget(summary_card)
+        left_layout.addWidget(summary_card)
 
         steps_card = CardWidget()
         steps_layout = QVBoxLayout(steps_card)
@@ -1256,7 +1268,13 @@ class HomePage(QWidget):
             desc_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
             steps_layout.addWidget(title_label)
             steps_layout.addWidget(desc_label)
-        layout.addWidget(steps_card)
+        left_layout.addWidget(steps_card)
+        left_layout.addStretch()
+
+        right_col = QWidget()
+        right_layout = QVBoxLayout(right_col)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(16)
 
         notes_card = CardWidget()
         notes_layout = QVBoxLayout(notes_card)
@@ -1312,9 +1330,46 @@ class HomePage(QWidget):
             desc_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
             notes_layout.addWidget(title_label)
             notes_layout.addWidget(desc_label)
-        layout.addWidget(notes_card)
+        right_layout.addWidget(notes_card)
+
+        appreciation_card = CardWidget()
+        appreciation_layout = QVBoxLayout(appreciation_card)
+        appreciation_layout.setSpacing(6)
+        appreciation_layout.addWidget(SubtitleLabel("Dukungan"))
+        appreciation_message = BodyLabel(
+            'Kalau merasa terbantu, saya senang sekali jika Anda berkenan '
+            'memberi ulasan di <a href="https://www.linkedin.com/in/novanniindipradana">'
+            "LinkedIn</a>."
+        )
+        appreciation_message.setWordWrap(True)
+        appreciation_message.setTextFormat(Qt.RichText)
+        appreciation_message.setOpenExternalLinks(True)
+        appreciation_message.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        appreciation_layout.addWidget(appreciation_message)
+        right_layout.addWidget(appreciation_card)
+        right_layout.addStretch()
+
+        self._content_layout.addWidget(left_col, stretch=1)
+        self._content_layout.addWidget(right_col, stretch=1)
+
         layout.addStretch()
         layout.addWidget(build_footer_label())
+        self._is_stacked = None
+        self._update_layout_mode(self.width())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_layout_mode(event.size().width())
+
+    def _update_layout_mode(self, width):
+        stacked = width < RESPONSIVE_BREAKPOINT
+        if stacked == self._is_stacked:
+            return
+        direction = (
+            QBoxLayout.TopToBottom if stacked else QBoxLayout.LeftToRight
+        )
+        self._content_layout.setDirection(direction)
+        self._is_stacked = stacked
 
 
 class SsoPage(QWidget):
