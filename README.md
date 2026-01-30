@@ -30,12 +30,22 @@ Namun, sebaiknya baca dokumentasi ini dulu agar alur kerjanya lebih jelas.
 ```text
 .
 |- dirgc/                 # Modul utama aplikasi
+|  |- browser.py          # Util Playwright: login/redirect DIRGC, filter, rate limit, pilih hasil GC
+|  |- cli.py              # Parsing argumen CLI + orkestrasi run (Playwright -> proses Excel)
+|  |- credentials.py      # Load kredensial dari env/JSON + fallback path
+|  |- excel.py            # Baca Excel + normalisasi kolom/nilai (idsbr, nama, alamat, koordinat, hasil_gc)
+|  |- logging_utils.py    # Logger konsol + formatter (juga untuk GUI via handler)
+|  |- matching.py         # Pencocokan usaha dari hasil filter (token match + scoring)
+|  |- processor.py        # Proses utama per baris Excel: filter, pilih usaha, isi form, submit, log
+|  |- run_logs.py         # Generate path & tulis file log Excel (logs/YYYYMMDD/runN_HHMM.xlsx)
+|  |- settings.py         # Konstanta & default config (URL, timeout, file default, dsb)
 |  `- gui/                # GUI (PyQt5 + QFluentWidgets)
+|     `- app.py           # Seluruh UI: halaman Run/Update/SSO/Settings + worker thread
 |- config/                # Konfigurasi lokal (contoh: credentials)
 |- data/                  # File input (Excel)
 |- logs/                  # Output log per run (Excel)
-|- run_dirgc.py           # Entry point CLI (wrapper)
-|- run_dirgc_gui.py       # Entry point GUI
+|- run_dirgc.py           # Entry point CLI (wrapper -> dirgc.cli.main)
+|- run_dirgc_gui.py       # Entry point GUI (wrapper -> dirgc.gui.app.main)
 |- requirements.txt
 `- README.md
 ```

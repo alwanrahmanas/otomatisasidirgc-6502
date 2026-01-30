@@ -1,3 +1,4 @@
+import random
 import re
 import time
 
@@ -89,13 +90,25 @@ class RequestRateLimiter:
     ketika server sudah menolak permintaan.
     """
 
-    def __init__(self, min_interval_s=1.2, penalty_initial_s=5, penalty_max_s=40):
+    def __init__(
+        self,
+        min_interval_s=1.2,
+        penalty_initial_s=5,
+        penalty_max_s=40,
+        jitter_s=0.0,
+        cooldown_after=0,
+        cooldown_s=0.0,
+    ):
         self.min_interval_s = max(0.1, float(min_interval_s))
         self.penalty_initial_s = max(0.0, float(penalty_initial_s))
         self.penalty_max_s = max(self.penalty_initial_s, float(penalty_max_s))
+        self.jitter_s = max(0.0, float(jitter_s))
+        self.cooldown_after = max(0, int(cooldown_after or 0))
+        self.cooldown_s = max(0.0, float(cooldown_s))
         self._last_request_ts = 0.0
         self._pending_penalty_s = 0.0
         self._last_penalty_s = 0.0
+        self._consecutive_rate_limits = 0
 
     def wait_for_slot(self, monitor):
         wait_seconds = 0.0
@@ -107,37 +120,52 @@ class RequestRateLimiter:
             elapsed = now - self._last_request_ts
             if elapsed < self.min_interval_s:
                 wait_seconds = max(wait_seconds, self.min_interval_s - elapsed)
+        if self.jitter_s > 0:
+            wait_seconds += random.uniform(0.0, self.jitter_s)
         if wait_seconds > 0:
             monitor.wait_for_condition(lambda: False, timeout_s=wait_seconds)
         self._last_request_ts = time.monotonic()
 
     def penalize(self):
+        self._consecutive_rate_limits += 1
         if self._last_penalty_s <= 0:
             next_penalty = self.penalty_initial_s
         else:
             next_penalty = min(self._last_penalty_s * 2, self.penalty_max_s)
         self._pending_penalty_s = max(self._pending_penalty_s, next_penalty)
         self._last_penalty_s = next_penalty
-        return next_penalty
+        extra_cooldown = 0.0
+        if self.cooldown_after and self._consecutive_rate_limits >= self.cooldown_after:
+            extra_cooldown = self.cooldown_s
+            if extra_cooldown > 0:
+                self._pending_penalty_s = max(
+                    self._pending_penalty_s, next_penalty + extra_cooldown
+                )
+        return next_penalty + extra_cooldown
 
     def reset_penalty(self):
         self._last_penalty_s = 0.0
+        self._consecutive_rate_limits = 0
 
 
 FILTER_RATE_LIMITER = RequestRateLimiter(
-    min_interval_s=1.5,
-    penalty_initial_s=5,
-    penalty_max_s=45,
+    min_interval_s=2.5,
+    penalty_initial_s=8,
+    penalty_max_s=60,
+    jitter_s=0.6,
 )
 MAX_RATE_LIMIT_RETRIES = 5
 
 
 SUBMIT_RATE_LIMITER = RequestRateLimiter(
-    min_interval_s=2.5,
-    penalty_initial_s=8,
-    penalty_max_s=60,
+    min_interval_s=6.0,
+    penalty_initial_s=20,
+    penalty_max_s=180,
+    jitter_s=1.2,
+    cooldown_after=3,
+    cooldown_s=120,
 )
-SUBMIT_POST_SUCCESS_DELAY_S = 2.5
+SUBMIT_POST_SUCCESS_DELAY_S = 4.0
 
 
 def install_user_activity_tracking(page, mark_activity):
