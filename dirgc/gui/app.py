@@ -338,6 +338,7 @@ class RunConfig:
     recap_output_dir: Optional[str]
     recap_sleep_ms: int
     recap_max_retries: int
+    recap_backup_every: int
     recap_resume: bool
 
 
@@ -394,6 +395,7 @@ class RunWorker(QThread):
                 recap_output_dir=self._config.recap_output_dir,
                 recap_sleep_ms=self._config.recap_sleep_ms,
                 recap_max_retries=self._config.recap_max_retries,
+                recap_backup_every=self._config.recap_backup_every,
                 recap_resume=self._config.recap_resume,
                 stop_event=self._stop_event,
                 progress_callback=self._emit_progress,
@@ -1347,6 +1349,7 @@ class RunPage(QWidget):
             recap_output_dir=None,
             recap_sleep_ms=800,
             recap_max_retries=3,
+            recap_backup_every=10,
             recap_resume=True,
         )
 
@@ -1370,9 +1373,6 @@ class RunPage(QWidget):
                 self._show_error(
                     "Matikan manual login untuk menggunakan Akun SSO."
                 )
-                return False
-            if not config.sso_username or not config.sso_password:
-                self._show_error("Akun SSO belum lengkap.")
                 return False
 
         return True
@@ -1591,12 +1591,12 @@ class RecapPage(RunPage):
             update_mode_default=False,
             title_text="Recap DIRGC",
             subtitle_text=(
-                "Tarik recap data DIRGC via API dan simpan ke Excel."
+                "Tarik rekap data DIRGC via API dan simpan ke Excel."
             ),
-            run_label="Mulai Recap",
-            run_card_title="Recap",
-            confirm_title="Mulai recap",
-            confirm_message="Mulai recap sekarang?",
+            run_label="Mulai Rekap",
+            run_card_title="Rekap",
+            confirm_title="Mulai rekap",
+            confirm_message="Mulai rekap sekarang?",
             settings_key="options_recap",
         )
         self._recap_start_ts = None
@@ -1636,7 +1636,7 @@ class RecapPage(RunPage):
     def _build_options_card(self):
         card = CardWidget()
         card_layout = QVBoxLayout(card)
-        card_layout.addWidget(SubtitleLabel("Recap Options"))
+        card_layout.addWidget(SubtitleLabel("Rekap Options"))
 
         form = QFormLayout()
         form.setHorizontalSpacing(12)
@@ -1656,9 +1656,15 @@ class RecapPage(RunPage):
         self.retry_spin.setRange(0, 10)
         self.retry_spin.setValue(3)
 
+        self.backup_spin = QSpinBox()
+        self.backup_spin.setRange(0, 9999)
+        self.backup_spin.setValue(10)
+        self.backup_spin.setSuffix(" batch")
+
         form.addRow(BodyLabel("Page size"), self.length_spin)
         form.addRow(BodyLabel("Delay"), self.sleep_spin)
         form.addRow(BodyLabel("Max retries"), self.retry_spin)
+        form.addRow(BodyLabel("Backup tiap N batch"), self.backup_spin)
 
         card_layout.addLayout(form)
         status_hint = CaptionLabel("Status filter dikunci: Semua.")
@@ -1711,6 +1717,7 @@ class RecapPage(RunPage):
                 ("length", self.length_spin),
                 ("sleep_ms", self.sleep_spin),
                 ("max_retries", self.retry_spin),
+                ("backup_every", self.backup_spin),
             ):
                 if key in options:
                     try:
@@ -1732,6 +1739,7 @@ class RecapPage(RunPage):
             "length": self.length_spin.value(),
             "sleep_ms": self.sleep_spin.value(),
             "max_retries": self.retry_spin.value(),
+            "backup_every": self.backup_spin.value(),
             "resume": self.resume_switch.isChecked(),
             "keep_open": self.keep_open_switch.isChecked(),
         }
@@ -1772,6 +1780,7 @@ class RecapPage(RunPage):
             recap_output_dir=output_dir,
             recap_sleep_ms=self.sleep_spin.value(),
             recap_max_retries=self.retry_spin.value(),
+            recap_backup_every=self.backup_spin.value(),
             recap_resume=self.resume_switch.isChecked(),
         )
 
@@ -1781,9 +1790,6 @@ class RecapPage(RunPage):
                 self._show_error(
                     "Matikan manual login untuk menggunakan Akun SSO."
                 )
-                return False
-            if not config.sso_username or not config.sso_password:
-                self._show_error("Akun SSO belum lengkap.")
                 return False
         return True
 
@@ -1797,6 +1803,7 @@ class RecapPage(RunPage):
         percent = int(round((processed / total) * 100))
         percent = min(max(percent, 0), 100)
         eta_text = ""
+        speed_text = " | Speed (rows/sec): -"
         if self._recap_start_ts and processed > 0:
             elapsed = max(1.0, time.time() - self._recap_start_ts)
             rate = processed / elapsed
@@ -1804,12 +1811,13 @@ class RecapPage(RunPage):
             eta_s = int(remaining / rate) if rate > 0 else 0
             hours = eta_s // 3600
             minutes = (eta_s % 3600) // 60
-            if hours > 0:
-                eta_text = f" | ETA {hours}h {minutes:02d}m"
-            else:
-                eta_text = f" | ETA {minutes}m"
+            secs = eta_s % 60
+            speed_text = f" | Speed (rows/sec): {rate:.1f}"
+            eta_text = (
+                f" | Estimated Time: {hours} Jam {minutes} Menit {secs} Detik"
+            )
         self.progress_label.setText(
-            f"Progress: {processed}/{total} ({percent}%){eta_text}"
+            f"Progress: {processed}/{total} ({percent}%){speed_text}{eta_text}"
         )
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(percent)
@@ -1821,6 +1829,7 @@ class RecapPage(RunPage):
             self.length_spin,
             self.sleep_spin,
             self.retry_spin,
+            self.backup_spin,
             self.resume_switch,
             self.keep_open_switch,
         ]:
@@ -2057,7 +2066,7 @@ class SsoPage(QWidget):
         card_layout.addWidget(SubtitleLabel("Kredensial"))
 
         self.use_switch = SwitchButton()
-        self.use_switch.setChecked(False)
+        self.use_switch.setChecked(True)
         card_layout.addWidget(
             self._make_toggle_row(
                 "Gunakan kredensial SSO",

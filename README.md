@@ -207,7 +207,8 @@ Perintah di atas hanya memproses baris 1 sampai 5 (1-based, inklusif).
 
 - `--headless` untuk menjalankan browser tanpa UI (SSO sering butuh mode non-headless).
 - `--idle-timeout-ms` untuk batas idle (default 1800000 / 30 menit).
-- Recap `--recap` menghasilkan Excel dengan 3 sheet: `Sudah GC`, `Belum GC`, `Duplikat`.
+- Rekap via `--recap` menghasilkan Excel dengan 3 sheet: `Sudah GC`, `Belum GC`, `Duplikat`.
+- `--recap-backup-every` untuk mengatur backup `.bak` setiap N batch (default: 10, gunakan 0 untuk mematikan).
 - `--web-timeout-s` untuk toleransi loading web (default 30 detik).
 - `--manual-only` untuk selalu login manual (tanpa auto-fill kredensial).
 - `--dirgc-only` untuk berhenti di halaman DIRGC (tanpa filter/input).
@@ -250,6 +251,18 @@ Untuk GUI, isi kredensial lewat menu `Akun SSO` (tidak disimpan ke file).
 
 Setiap run akan menghasilkan file log Excel di folder `logs/YYYYMMDD/`.
 Nama file mengikuti pola `run{N}_{HHMM}.xlsx` (contoh: `run1_0930.xlsx`).
+
+Untuk **rekap** (`--recap` / menu Recap), file output ada di `logs/recap/YYYYMMDD/`
+dengan nama `rekap{N}_{HHMMSS}.xlsx`. Penyimpanan rekap dibuat aman per batch:
+
+- Sebelum menulis, file lama dibackup menjadi `.bak`.
+- File baru ditulis ke file sementara, lalu di-`replace` secara atomik.
+- Jika file sedang terkunci (mis. dibuka di Excel), bisa muncul file `.new`.
+  Tutup Excel, lalu rename `.new` menjadi `.xlsx`.
+
+Jika terjadi error di batch tengah, batch sebelumnya tetap aman di file utama
+atau backup `.bak`.
+Frekuensi backup bisa diatur via `--recap-backup-every` (contoh: `--recap-backup-every 5`).
 
 Kolom log:
 

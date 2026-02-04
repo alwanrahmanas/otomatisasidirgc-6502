@@ -118,14 +118,12 @@ def build_parser():
     )
     parser.add_argument(
         "--recap",
-        "--rekap",
         dest="recap",
         action="store_true",
-        help="Fetch DIRGC data via API and export Excel recap.",
+        help="Fetch DIRGC data via API and export Excel rekap.",
     )
     parser.add_argument(
         "--recap-length",
-        "--rekap-length",
         dest="recap_length",
         type=int,
         default=500,
@@ -133,13 +131,11 @@ def build_parser():
     )
     parser.add_argument(
         "--recap-output-dir",
-        "--rekap-output-dir",
         dest="recap_output_dir",
-        help="Output directory for recap Excel (default: logs/recap).",
+        help="Output directory for rekap Excel (default: logs/recap).",
     )
     parser.add_argument(
         "--recap-sleep-ms",
-        "--rekap-sleep-ms",
         dest="recap_sleep_ms",
         type=int,
         default=800,
@@ -147,18 +143,26 @@ def build_parser():
     )
     parser.add_argument(
         "--recap-max-retries",
-        "--rekap-max-retries",
         dest="recap_max_retries",
         type=int,
         default=3,
         help="Max retries per page request (default: 3).",
     )
     parser.add_argument(
+        "--recap-backup-every",
+        dest="recap_backup_every",
+        type=int,
+        default=10,
+        help=(
+            "Create .bak backup every N batches during recap "
+            "(default: 10). Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
         "--recap-no-resume",
-        "--rekap-no-resume",
         dest="recap_no_resume",
         action="store_true",
-        help="Ignore existing checkpoint and start a new recap run.",
+        help="Ignore existing checkpoint and start a new rekap run.",
     )
     parser.add_argument(
         "--api-log",
@@ -317,6 +321,7 @@ def run_dirgc(
     recap_sleep_ms=800,
     recap_max_retries=3,
     recap_resume=True,
+    recap_backup_every=10,
 ):
     prefixes = None
     if isinstance(vpn_prefixes, str) and vpn_prefixes.strip():
@@ -463,6 +468,7 @@ def run_dirgc(
                 sleep_ms=recap_sleep_ms,
                 max_retries=recap_max_retries,
                 resume=recap_resume,
+                backup_every=recap_backup_every,
                 progress_callback=progress_callback,
             )
         elif dirgc_only:
@@ -996,6 +1002,7 @@ def main():
         recap_output_dir=args.recap_output_dir,
         recap_sleep_ms=args.recap_sleep_ms,
         recap_max_retries=args.recap_max_retries,
+        recap_backup_every=args.recap_backup_every,
         recap_resume=not args.recap_no_resume,
     )
 

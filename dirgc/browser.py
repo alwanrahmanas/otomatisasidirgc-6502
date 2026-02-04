@@ -389,13 +389,32 @@ def ensure_on_dirgc(
             return False
 
         if not monitor.wait_for_condition(
-            lambda: page.locator("#username").count() > 0, 15
+            lambda: (
+                page.locator("#username").count() > 0
+                or page.locator("input[name='username']").count() > 0
+            ),
+            30,
         ):
             log_warn("Login fields not found; switching to manual login.")
             return False
 
-        monitor.bot_fill("#username", username)
-        monitor.bot_fill("#password", password)
+        username_locator = page.locator("#username")
+        if username_locator.count() == 0:
+            username_locator = page.locator("input[name='username']")
+        if username_locator.count() == 0:
+            log_warn("Login fields not found; switching to manual login.")
+            return False
+        if not username_locator.first.is_visible():
+            if not monitor.wait_for_condition(
+                lambda: username_locator.first.is_visible(), 15
+            ):
+                log_warn(
+                    "Login fields not visible; switching to manual login."
+                )
+                return False
+
+        monitor.bot_fill("input#username, input[name='username']", username)
+        monitor.bot_fill("input#password, input[name='password']", password)
         monitor.bot_click("#kc-login")
 
         error_selectors = [

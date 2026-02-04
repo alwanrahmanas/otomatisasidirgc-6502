@@ -1,18 +1,39 @@
 import json
 import os
 import re
+import shutil
+import tempfile
 import time
 
 from .logging_utils import log_error, log_info, log_warn
 
 
 DEFAULT_OUTPUT_DIR = os.path.join("logs", "recap")
-CHECKPOINT_FILENAME = "recap_checkpoint.json"
+CHECKPOINT_FILENAME = "rekap_checkpoint.json"
 SPLIT_SHEETS = ("Sudah GC", "Belum GC", "Duplikat")
+BACKUP_SUFFIX = ".bak"
 
 
 def _now_readable():
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_duration(seconds):
+    seconds = max(0, int(seconds))
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _format_eta_id(seconds):
+    seconds = max(0, int(seconds))
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    return f"{hours} Jam {minutes} Menit {secs} Detik"
 
 
 def _to_int(value):
@@ -57,9 +78,9 @@ def _build_output_path(output_dir):
     date_folder = time.strftime("%Y%m%d")
     date_dir = os.path.join(output_dir, date_folder)
     os.makedirs(date_dir, exist_ok=True)
-    run_number = _next_run_number(date_dir, "recap")
+    run_number = _next_run_number(date_dir, "rekap")
     time_label = time.strftime("%H%M%S")
-    filename = f"recap{run_number}_{time_label}.xlsx"
+    filename = f"rekap{run_number}_{time_label}.xlsx"
     return os.path.join(date_dir, filename)
 
 
@@ -171,14 +192,70 @@ def _ensure_sheet(workbook, name, columns):
     return sheet
 
 
-def _append_xlsx_split(xlsx_path, rows, columns):
+def _backup_path(xlsx_path):
+    return f"{xlsx_path}{BACKUP_SUFFIX}"
+
+
+def _backup_existing(xlsx_path):
+    if not os.path.exists(xlsx_path):
+        return None
+    backup_path = _backup_path(xlsx_path)
+    try:
+        shutil.copy2(xlsx_path, backup_path)
+        return backup_path
+    except Exception as exc:
+        log_warn(
+            "Failed to create Excel backup.",
+            path=backup_path,
+            error=str(exc),
+        )
+        return None
+
+
+def _safe_save_workbook(workbook, xlsx_path):
+    dir_name = os.path.dirname(xlsx_path) or "."
+    base = os.path.basename(xlsx_path)
+    tmp_path = None
+    try:
+        os.makedirs(dir_name, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{base}.", suffix=".tmp", dir=dir_name
+        )
+        os.close(fd)
+        workbook.save(tmp_path)
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
+    try:
+        os.replace(tmp_path, xlsx_path)
+    except Exception as exc:
+        fallback_path = f"{xlsx_path}.new"
+        try:
+            os.replace(tmp_path, fallback_path)
+            log_warn(
+                "Failed to replace Excel; wrote fallback file.",
+                path=fallback_path,
+                error=str(exc),
+            )
+        except Exception:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+        raise
+
+
+def _append_xlsx_split(xlsx_path, rows, columns, *, backup_existing=True):
     if not rows:
         return
     try:
         import openpyxl
     except ImportError as exc:
         raise RuntimeError(
-            "Install openpyxl to write recap Excel."
+            "Install openpyxl to write rekap Excel."
         ) from exc
 
     new_book = not os.path.exists(xlsx_path)
@@ -187,7 +264,19 @@ def _append_xlsx_split(xlsx_path, rows, columns):
         active = workbook.active
         active.title = SPLIT_SHEETS[0]
     else:
-        workbook = openpyxl.load_workbook(xlsx_path)
+        try:
+            workbook = openpyxl.load_workbook(xlsx_path)
+        except Exception as exc:
+            backup_path = _backup_path(xlsx_path)
+            if os.path.exists(backup_path):
+                log_warn(
+                    "Failed to load Excel; using backup.",
+                    path=backup_path,
+                    error=str(exc),
+                )
+                workbook = openpyxl.load_workbook(backup_path)
+            else:
+                raise
 
     for name in SPLIT_SHEETS:
         _ensure_sheet(workbook, name, columns)
@@ -206,8 +295,9 @@ def _append_xlsx_split(xlsx_path, rows, columns):
         for row in items:
             sheet.append([row.get(col, "") for col in columns])
 
-    workbook.save(xlsx_path)
-    workbook.close()
+    if backup_existing:
+        _backup_existing(xlsx_path)
+    _safe_save_workbook(workbook, xlsx_path)
 
 
 def _load_checkpoint(path):
@@ -252,20 +342,33 @@ def run_recap(
     sleep_ms=800,
     max_retries=3,
     resume=True,
+    backup_every=10,
     progress_callback=None,
 ):
-    log_info(
-        "Starting recap.",
-        status_filter=status_filter,
-        length=length,
-    )
+    start_ts_epoch = time.time()
     if length < 1:
         length = 100
+    try:
+        backup_every = int(backup_every)
+    except (TypeError, ValueError):
+        backup_every = 1
+    if backup_every < 0:
+        backup_every = 0
     output_dir = output_dir or DEFAULT_OUTPUT_DIR
     os.makedirs(output_dir, exist_ok=True)
     checkpoint_path = os.path.join(output_dir, CHECKPOINT_FILENAME)
+    legacy_checkpoint_path = os.path.join(output_dir, "recap_checkpoint.json")
 
-    checkpoint = _load_checkpoint(checkpoint_path) if resume else None
+    checkpoint = None
+    if resume:
+        checkpoint = _load_checkpoint(checkpoint_path)
+        if checkpoint is None and os.path.exists(legacy_checkpoint_path):
+            checkpoint = _load_checkpoint(legacy_checkpoint_path)
+            if checkpoint is not None:
+                log_warn(
+                    "Legacy checkpoint found; resume using it once.",
+                    path=legacy_checkpoint_path,
+                )
     start_at = 0
     total_records = None
     output_path = None
@@ -282,7 +385,7 @@ def run_recap(
             columns = checkpoint.get("columns")
             if output_path and os.path.exists(output_path):
                 log_info(
-                    "Resuming recap from checkpoint.",
+                    "Resuming rekap from checkpoint.",
                     start_at=start_at,
                     length=length,
                     output_path=output_path or "-",
@@ -307,6 +410,15 @@ def run_recap(
     if not output_path:
         output_path = _build_output_path(output_dir)
 
+    backup_every_label = backup_every if backup_every > 0 else "off"
+    log_info(
+        "Rekap",
+        status="Running",
+        output_path=output_path,
+        checkpoint_path=checkpoint_path,
+        backup_every=backup_every_label,
+    )
+
     base_payload = _collect_filter_payload(page, status_filter)
     csrf_token = _extract_csrf_token(page)
     if csrf_token:
@@ -327,6 +439,7 @@ def run_recap(
         else total_records
     )
     processed_total = 0
+    batch_index = 0
     while True:
         monitor.mark_activity("recap")
         payload = dict(base_payload)
@@ -418,25 +531,38 @@ def run_recap(
         ]
         if columns is None:
             columns = list(rows[0].keys()) if rows else []
-        _append_xlsx_split(output_path, rows, columns)
+        next_batch_index = batch_index + 1
+        do_backup = (
+            backup_every > 0
+            and next_batch_index % backup_every == 0
+        )
+        _append_xlsx_split(
+            output_path,
+            rows,
+            columns,
+            backup_existing=do_backup,
+        )
         monitor.mark_activity("recap")
+        batch_index += 1
         processed_total += len(rows)
+        total_value = (
+            effective_records
+            if isinstance(effective_records, int) and effective_records > 0
+            else None
+        )
         log_info(
             "Batch saved.",
+            batch=batch_index,
             start=current_start,
             count=len(rows),
-            total=(
-                records_filtered
-                if records_filtered is not None
-                else (effective_records if effective_records is not None else "-")
+            progress=(
+                f"{processed_total}/{total_value}"
+                if total_value
+                else f"{processed_total}/-"
             ),
         )
         if progress_callback:
-            total_value = (
-                effective_records
-                if isinstance(effective_records, int) and effective_records > 0
-                else 0
-            )
+            total_value = total_value if total_value is not None else 0
             try:
                 progress_callback(processed_total, total_value, 0)
             except Exception:
@@ -447,6 +573,7 @@ def run_recap(
             "run_started_at": start_ts,
             "last_start": current_start,
             "length": length,
+            "backup_every": backup_every,
             "records_total": total_records,
             "records_filtered": records_filtered,
             "status_filter": status_filter,
@@ -470,13 +597,14 @@ def run_recap(
             )
 
     if not os.path.exists(output_path):
-        raise RuntimeError("Recap Excel not found; no data saved.")
+        raise RuntimeError("Rekap Excel not found; no data saved.")
 
     checkpoint_done = {
         "status": "done",
         "run_started_at": start_ts,
         "run_finished_at": _now_readable(),
         "length": length,
+        "backup_every": backup_every,
         "records_total": total_records,
         "records_filtered": effective_records,
         "status_filter": status_filter,
@@ -485,5 +613,12 @@ def run_recap(
         "split_sheets": list(SPLIT_SHEETS),
     }
     _save_checkpoint(checkpoint_path, checkpoint_done)
-    log_info("Recap saved.", path=output_path)
+    duration = _format_eta_id(time.time() - start_ts_epoch)
+    log_info(
+        "Rekap selesai",
+        status="Done",
+        total=processed_total,
+        duration=duration,
+        output_path=output_path,
+    )
     return output_path
