@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -96,10 +97,18 @@ def save_gui_settings(data):
 
 def build_footer_label():
     footer = CaptionLabel(
-        "Made with ❤️and ☕ - Novanni Indi Pradana - IPDS BPS 6502"
+        'Made with ❤️ and ☕ - <a href="https://www.linkedin.com/in/novanniindipradana">'
+        "Novanni Indi Pradana</a> - IPDS BPS 6502"
     )
     footer.setAlignment(Qt.AlignCenter)
-    footer.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+    footer.setTextFormat(Qt.RichText)
+    footer.setTextInteractionFlags(Qt.TextBrowserInteraction)
+    footer.setOpenExternalLinks(True)
+    footer.setStyleSheet(
+        f"color: {MUTED_TEXT_COLOR};"
+        f"QLabel a {{ color: {MUTED_TEXT_COLOR}; text-decoration: none; }}"
+        "QLabel a:hover { text-decoration: underline; }"
+    )
     return footer
 
 
@@ -324,6 +333,13 @@ class RunConfig:
     submit_mode: str
     session_refresh_every: int
     stop_on_cooldown: bool
+    recap: bool
+    recap_length: int
+    recap_status_filter: str
+    recap_output_dir: Optional[str]
+    recap_sleep_ms: int
+    recap_max_retries: int
+    recap_resume: bool
 
 
 class RunWorker(QThread):
@@ -374,6 +390,13 @@ class RunWorker(QThread):
                 submit_mode=self._config.submit_mode,
                 session_refresh_every=self._config.session_refresh_every,
                 stop_on_cooldown=self._config.stop_on_cooldown,
+                recap=self._config.recap,
+                recap_length=self._config.recap_length,
+                recap_status_filter=self._config.recap_status_filter,
+                recap_output_dir=self._config.recap_output_dir,
+                recap_sleep_ms=self._config.recap_sleep_ms,
+                recap_max_retries=self._config.recap_max_retries,
+                recap_resume=self._config.recap_resume,
                 stop_event=self._stop_event,
                 progress_callback=self._emit_progress,
                 wait_for_close=self._wait_for_close
@@ -652,8 +675,8 @@ class RunPage(QWidget):
         card_layout.addWidget(
             self._make_option_row(
                 "Opsi lanjutan",
-                "Tampilkan opsi teknis seperti headless, cooldown, dan "
-                "keep open.",
+                "Tampilkan opsi teknis seperti cooldown, refresh session, "
+                "dan keep open.",
                 self.advanced_switch,
             )
         )
@@ -712,18 +735,8 @@ class RunPage(QWidget):
         refresh_layout.addWidget(self.session_refresh_spin)
         advanced_layout.addWidget(refresh_row)
 
-        self.headless_switch = SwitchButton()
-        self.headless_switch.setChecked(False)
-        advanced_layout.addWidget(
-            self._make_option_row(
-                "Browser tanpa tampilan (headless)",
-                "ON: browser tidak terlihat. Tidak disarankan untuk SSO/OTP.",
-                self.headless_switch,
-            )
-        )
-
         self.keep_open_switch = SwitchButton()
-        self.keep_open_switch.setChecked(False)
+        self.keep_open_switch.setChecked(True)
         keep_open_row = self._make_option_row(
             "Biarkan browser tetap terbuka",
             "ON: browser tetap terbuka sampai kamu menutupnya.",
@@ -1031,10 +1044,10 @@ class RunPage(QWidget):
         if isinstance(excel_path, str) and excel_path:
             self._set_excel_path(excel_path, push_recent=False, save=False)
 
-        if "headless" in options:
-            self.headless_switch.setChecked(bool(options["headless"]))
         if self._show_keep_open and "keep_open" in options:
             self.keep_open_switch.setChecked(bool(options["keep_open"]))
+        elif self._show_keep_open:
+            self.keep_open_switch.setChecked(True)
         else:
             self.keep_open_switch.setChecked(False)
         if self._show_dirgc_only and "dirgc_only" in options:
@@ -1079,7 +1092,6 @@ class RunPage(QWidget):
         if hasattr(self, "advanced_switch"):
             advanced_active = any(
                 [
-                    self.headless_switch.isChecked(),
                     self.keep_open_switch.isChecked(),
                     self.stop_on_cooldown_switch.isChecked(),
                     self.submit_request_switch.isChecked(),
@@ -1117,7 +1129,6 @@ class RunPage(QWidget):
         data["excel_path"] = self.excel_input.text().strip()
         data["recent_excels"] = self._recent_excels
         options = {
-            "headless": self.headless_switch.isChecked(),
             "keep_open": self.keep_open_switch.isChecked(),
             "dirgc_only": self.dirgc_only_switch.isChecked(),
             "edit_nama_alamat": self.edit_nama_alamat_switch.isChecked(),
@@ -1313,7 +1324,7 @@ class RunPage(QWidget):
         session_refresh_every = self.session_refresh_spin.value()
 
         return RunConfig(
-            headless=self.headless_switch.isChecked(),
+            headless=False,
             manual_only=not use_sso,
             excel_file=excel_file,
             start_row=start_row,
@@ -1333,6 +1344,13 @@ class RunPage(QWidget):
             submit_mode=submit_mode,
             session_refresh_every=session_refresh_every,
             stop_on_cooldown=self.stop_on_cooldown_switch.isChecked(),
+            recap=False,
+            recap_length=500,
+            recap_status_filter="semua",
+            recap_output_dir=None,
+            recap_sleep_ms=800,
+            recap_max_retries=3,
+            recap_resume=True,
         )
 
     def _validate_inputs(self, config: RunConfig):
@@ -1385,6 +1403,9 @@ class RunPage(QWidget):
         self.cooldown_label.setText("Cooldown: -")
         self._set_progress_loading()
         self._append_log("=== START RUN ===")
+
+        if isinstance(self, RecapPage):
+            self._recap_start_ts = None
 
         self._worker = RunWorker(config)
         self._worker.log_line.connect(self._append_log)
@@ -1521,7 +1542,6 @@ class RunPage(QWidget):
             self.recent_combo,
             self.resume_button,
             self.advanced_switch,
-            self.headless_switch,
             self.keep_open_switch,
             self.stop_on_cooldown_switch,
             self.dirgc_only_switch,
@@ -1564,6 +1584,268 @@ class RunPage(QWidget):
             self._worker.release_close()
         if dialog.isVisible():
             dialog.accept()
+
+
+class RecapPage(RunPage):
+    def __init__(self, sso_page=None, parent=None):
+        super().__init__(
+            sso_page,
+            parent,
+            update_mode_default=False,
+            title_text="Recap DIRGC",
+            subtitle_text=(
+                "Tarik recap data DIRGC via API dan simpan ke Excel."
+            ),
+            run_label="Mulai Recap",
+            run_card_title="Recap",
+            confirm_title="Mulai recap",
+            confirm_message="Mulai recap sekarang?",
+            settings_key="options_recap",
+        )
+        self._recap_start_ts = None
+
+    def _build_files_card(self):
+        card = CardWidget()
+        card_layout = QVBoxLayout(card)
+        card_layout.addWidget(SubtitleLabel("Output"))
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.output_dir_input = LineEdit()
+        self.output_dir_input.setPlaceholderText("logs/recap")
+        self.output_dir_input.editingFinished.connect(self._save_settings)
+        self.output_dir_browse = PushButton("Browse")
+        self.output_dir_browse.clicked.connect(self._browse_output_dir)
+
+        output_row = QWidget()
+        output_layout = QHBoxLayout(output_row)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(8)
+        output_layout.addWidget(self.output_dir_input, stretch=1)
+        output_layout.addWidget(self.output_dir_browse)
+
+        form.addRow(BodyLabel("Folder output"), output_row)
+        card_layout.addLayout(form)
+
+        hint = CaptionLabel("Kosong = default logs/recap.")
+        hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        card_layout.addWidget(hint)
+
+        return card
+
+    def _build_options_card(self):
+        card = CardWidget()
+        card_layout = QVBoxLayout(card)
+        card_layout.addWidget(SubtitleLabel("Recap Options"))
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.length_spin = QSpinBox()
+        self.length_spin.setRange(10, 2000)
+        self.length_spin.setValue(500)
+
+        self.sleep_spin = QSpinBox()
+        self.sleep_spin.setRange(0, 10000)
+        self.sleep_spin.setValue(800)
+        self.sleep_spin.setSuffix(" ms")
+
+        self.retry_spin = QSpinBox()
+        self.retry_spin.setRange(0, 10)
+        self.retry_spin.setValue(3)
+
+        form.addRow(BodyLabel("Page size"), self.length_spin)
+        form.addRow(BodyLabel("Delay"), self.sleep_spin)
+        form.addRow(BodyLabel("Max retries"), self.retry_spin)
+
+        card_layout.addLayout(form)
+        status_hint = CaptionLabel("Status filter dikunci: Semua.")
+        status_hint.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        card_layout.addWidget(status_hint)
+
+        self.resume_switch = SwitchButton()
+        self.resume_switch.setChecked(True)
+        card_layout.addWidget(
+            self._make_option_row(
+                "Resume dari checkpoint",
+                "ON: lanjutkan dari proses terakhir jika checkpoint tersedia.",
+                self.resume_switch,
+            )
+        )
+
+        self.keep_open_switch = SwitchButton()
+        self.keep_open_switch.setChecked(True)
+        card_layout.addWidget(
+            self._make_option_row(
+                "Biarkan browser tetap terbuka",
+                "ON: browser tetap terbuka setelah proses selesai.",
+                self.keep_open_switch,
+            )
+        )
+
+        return card
+
+    def _browse_output_dir(self):
+        start_dir = os.getcwd()
+        if self.output_dir_input.text():
+            start_dir = self.output_dir_input.text()
+        path = QFileDialog.getExistingDirectory(
+            self, "Select folder", start_dir
+        )
+        if path:
+            self.output_dir_input.setText(path)
+            self._save_settings()
+
+    def _load_settings(self):
+        data = load_gui_settings()
+        options = data.get(self._settings_key, {})
+
+        if isinstance(options, dict):
+            output_dir = options.get("output_dir")
+            if isinstance(output_dir, str):
+                self.output_dir_input.setText(output_dir)
+
+            for key, widget in (
+                ("length", self.length_spin),
+                ("sleep_ms", self.sleep_spin),
+                ("max_retries", self.retry_spin),
+            ):
+                if key in options:
+                    try:
+                        widget.setValue(int(options[key]))
+                    except (TypeError, ValueError):
+                        pass
+
+            if "resume" in options:
+                self.resume_switch.setChecked(bool(options["resume"]))
+            if "keep_open" in options:
+                self.keep_open_switch.setChecked(bool(options["keep_open"]))
+            else:
+                self.keep_open_switch.setChecked(True)
+
+    def _save_settings(self):
+        data = load_gui_settings()
+        options = {
+            "output_dir": self.output_dir_input.text().strip(),
+            "length": self.length_spin.value(),
+            "sleep_ms": self.sleep_spin.value(),
+            "max_retries": self.retry_spin.value(),
+            "resume": self.resume_switch.isChecked(),
+            "keep_open": self.keep_open_switch.isChecked(),
+        }
+        data[self._settings_key] = options
+        save_gui_settings(data)
+
+    def _build_config(self):
+        use_sso, sso_username, sso_password = self._get_sso_values()
+        idle_timeout_s = load_idle_timeout_s()
+        web_timeout_s = load_web_timeout_s()
+
+        output_dir = self.output_dir_input.text().strip()
+        output_dir = output_dir if output_dir else None
+
+        return RunConfig(
+            headless=False,
+            manual_only=not use_sso,
+            excel_file=None,
+            start_row=None,
+            end_row=None,
+            idle_timeout_ms=idle_timeout_s * 1000,
+            web_timeout_s=web_timeout_s,
+            keep_open=self.keep_open_switch.isChecked(),
+            dirgc_only=False,
+            edit_nama_alamat=False,
+            prefer_excel_coords=True,
+            update_mode=False,
+            update_fields=None,
+            use_sso=use_sso,
+            sso_username=sso_username,
+            sso_password=sso_password,
+            rate_limit_profile=load_rate_limit_profile(),
+            submit_mode="ui",
+            session_refresh_every=0,
+            stop_on_cooldown=False,
+            recap=True,
+            recap_length=self.length_spin.value(),
+            recap_status_filter="semua",
+            recap_output_dir=output_dir,
+            recap_sleep_ms=self.sleep_spin.value(),
+            recap_max_retries=self.retry_spin.value(),
+            recap_resume=self.resume_switch.isChecked(),
+        )
+
+    def _validate_inputs(self, config: RunConfig):
+        if config.use_sso:
+            if config.manual_only:
+                self._show_error(
+                    "Matikan manual login untuk menggunakan Akun SSO."
+                )
+                return False
+            if not config.sso_username or not config.sso_password:
+                self._show_error("Akun SSO belum lengkap.")
+                return False
+        return True
+
+    def _update_progress(self, processed, total, _excel_row):
+        if self._recap_start_ts is None and processed > 0:
+            self._recap_start_ts = time.time()
+        if total <= 0:
+            self.progress_label.setText("Progress: memuat data...")
+            self._set_progress_loading()
+            return
+        percent = int(round((processed / total) * 100))
+        percent = min(max(percent, 0), 100)
+        eta_text = ""
+        if self._recap_start_ts and processed > 0:
+            elapsed = max(1.0, time.time() - self._recap_start_ts)
+            rate = processed / elapsed
+            remaining = max(0, total - processed)
+            eta_s = int(remaining / rate) if rate > 0 else 0
+            hours = eta_s // 3600
+            minutes = (eta_s % 3600) // 60
+            if hours > 0:
+                eta_text = f" | ETA {hours}h {minutes:02d}m"
+            else:
+                eta_text = f" | ETA {minutes}m"
+        self.progress_label.setText(
+            f"Progress: {processed}/{total} ({percent}%){eta_text}"
+        )
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(percent)
+
+    def _set_controls_enabled(self, enabled):
+        for widget in [
+            self.output_dir_input,
+            self.output_dir_browse,
+            self.length_spin,
+            self.sleep_spin,
+            self.retry_spin,
+            self.resume_switch,
+            self.keep_open_switch,
+        ]:
+            widget.setEnabled(enabled)
+        if self._sso_page:
+            self._sso_page.set_controls_enabled(enabled)
+
+    def _auto_apply_resume_state(self, config: RunConfig):
+        return config
+
+    def _open_log_folder(self):
+        log_dir = os.path.join(os.getcwd(), "logs", "recap")
+        os.makedirs(log_dir, exist_ok=True)
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(log_dir)):
+            InfoBar.error(
+                title="Gagal membuka folder",
+                content="Tidak bisa membuka folder recap.",
+                duration=3000,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+            )
 
 
 class HomePage(QWidget):
@@ -1671,10 +1953,6 @@ class HomePage(QWidget):
         notes_layout.addWidget(SubtitleLabel("Keterangan Opsi"))
 
         notes = [
-            (
-                "Browser tanpa tampilan (headless) - Opsi lanjutan",
-                "ON: browser tidak terlihat. Tidak disarankan untuk SSO/OTP.",
-            ),
             (
                 "Biarkan browser tetap terbuka - Opsi lanjutan",
                 "ON: browser tetap terbuka setelah proses selesai.",
@@ -2221,12 +2499,14 @@ class MainWindow(FluentWindow):
             confirm_message="Mulai update sekarang?",
             settings_key="options_update",
         )
+        self.recap_page = RecapPage(self.sso_page, self)
         self.settings_page = SettingsPage(self._app, self)
         self.rate_limit_page = RateLimitPage(self)
         self.home_page.setObjectName("home_page")
         self.run_page.setObjectName("run_page")
         self.sso_page.setObjectName("sso_page")
         self.update_page.setObjectName("update_page")
+        self.recap_page.setObjectName("recap_page")
         self.settings_page.setObjectName("settings_page")
         self.rate_limit_page.setObjectName("rate_limit_page")
 
@@ -2234,6 +2514,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.sso_page, FIF.PEOPLE, "Akun SSO")
         self.addSubInterface(self.run_page, FIF.PLAY, "Run")
         self.addSubInterface(self.update_page, FIF.EDIT, "Update")
+        self.addSubInterface(self.recap_page, FIF.DOCUMENT, "Recap")
         self.addSubInterface(
             self.rate_limit_page, FIF.INFO, "Mode Stabilitas"
         )
@@ -2249,6 +2530,8 @@ class MainWindow(FluentWindow):
             self.run_page._save_settings()
         if self.update_page:
             self.update_page._save_settings()
+        if self.recap_page:
+            self.recap_page._save_settings()
         super().closeEvent(event)
 
 

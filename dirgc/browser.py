@@ -39,9 +39,20 @@ class ActivityMonitor:
     def idle_check(self):
         self._check_stop()
         if time.monotonic() - self.last_activity > self.idle_timeout_s:
-            raise RuntimeError(
-                "Idle timeout reached (5 minutes without activity)."
-            )
+            total_seconds = int(round(self.idle_timeout_s))
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            if minutes >= 1:
+                message = (
+                    "Idle timeout reached "
+                    f"({minutes} minutes {seconds} seconds without activity)."
+                )
+            else:
+                message = (
+                    "Idle timeout reached "
+                    f"({total_seconds} seconds without activity)."
+                )
+            raise RuntimeError(message)
 
     def scale_timeout(self, timeout_s):
         if timeout_s is None:

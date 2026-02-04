@@ -164,6 +164,17 @@ Setelah GUI terbuka:
 6. Jika sering muncul pesan *Something Went Wrong* saat submit, buka menu
    `Mode Stabilitas` dan pilih mode agar jeda antar submit lebih panjang dan 429 lebih jarang muncul.
 
+### Menu pada GUI
+
+- **Beranda**: ringkasan singkat fungsi aplikasi dan cara pakai.
+- **Akun SSO**: tempat mengisi kredensial SSO untuk auto-login (tidak disimpan ke file).
+- **Run**: proses input GC dari Excel (operasional utama).
+- **Update**: memperbarui data via tombol **Edit Hasil** (Hasil GC/Nama/Alamat/Koordinat).
+- **Recap**: menarik semua data via API dan menyimpan Excel rekap di `logs/recap/`  
+  Output otomatis terpisah 3 sheet: **Sudah GC**, **Belum GC**, **Duplikat**.
+- **Mode Stabilitas**: memilih profil rate limit untuk mengurangi HTTP 429.
+- **Settings**: pengaturan lanjutan (idle timeout, web timeout, skala font, dsb).
+
 ## Cara Menjalankan - Script atau Terminal
 
 ### Perintah dasar
@@ -195,12 +206,13 @@ Perintah di atas hanya memproses baris 1 sampai 5 (1-based, inklusif).
 ### Opsi CLI tambahan
 
 - `--headless` untuk menjalankan browser tanpa UI (SSO sering butuh mode non-headless).
-- `--idle-timeout-ms` untuk batas idle (default 300000 / 5 menit).
+- `--idle-timeout-ms` untuk batas idle (default 1800000 / 30 menit).
+- Recap `--recap` menghasilkan Excel dengan 3 sheet: `Sudah GC`, `Belum GC`, `Duplikat`.
 - `--web-timeout-s` untuk toleransi loading web (default 30 detik).
 - `--manual-only` untuk selalu login manual (tanpa auto-fill kredensial).
 - `--dirgc-only` untuk berhenti di halaman DIRGC (tanpa filter/input).
 - `--edit-nama-alamat` untuk mengaktifkan toggle edit Nama/Alamat Usaha dan isi dari Excel.
-- `--keep-open` untuk menahan browser tetap terbuka setelah proses.
+- `--keep-open` untuk menahan browser tetap terbuka setelah proses (default aktif). Gunakan `--no-keep-open` untuk menutup otomatis.
 - `--update-mode` untuk menggunakan tombol Edit Hasil (update data).
 - `--prefer-web-coords` untuk mempertahankan koordinat yang sudah terisi di web.
 - `--update-fields` untuk memilih field yang di-update (contoh: `hasil_gc,nama_usaha,alamat,koordinat`).

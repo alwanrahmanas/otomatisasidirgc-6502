@@ -1,0 +1,489 @@
+import json
+import os
+import re
+import time
+
+from .logging_utils import log_error, log_info, log_warn
+
+
+DEFAULT_OUTPUT_DIR = os.path.join("logs", "recap")
+CHECKPOINT_FILENAME = "recap_checkpoint.json"
+SPLIT_SHEETS = ("Sudah GC", "Belum GC", "Duplikat")
+
+
+def _now_readable():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _to_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_csrf_token(page):
+    try:
+        locator = page.locator('meta[name="csrf-token"]')
+        if locator.count() > 0:
+            return locator.first.get_attribute("content") or ""
+    except Exception:
+        return ""
+    return ""
+
+
+def _next_run_number(date_dir, prefix):
+    max_run = 0
+    pattern = f"{prefix}*_*.xlsx"
+    for filename in os.listdir(date_dir):
+        if not filename.endswith(".xlsx"):
+            continue
+        if not filename.startswith(prefix):
+            continue
+        stem = filename[:-5]
+        match = re.match(rf"{re.escape(prefix)}(\d+)_", stem)
+        if not match:
+            continue
+        try:
+            number = int(match.group(1))
+        except ValueError:
+            continue
+        if number > max_run:
+            max_run = number
+    return max_run + 1
+
+
+def _build_output_path(output_dir):
+    date_folder = time.strftime("%Y%m%d")
+    date_dir = os.path.join(output_dir, date_folder)
+    os.makedirs(date_dir, exist_ok=True)
+    run_number = _next_run_number(date_dir, "recap")
+    time_label = time.strftime("%H%M%S")
+    filename = f"recap{run_number}_{time_label}.xlsx"
+    return os.path.join(date_dir, filename)
+
+
+def _collect_filter_payload(page, status_filter):
+    keys = [
+        "nama_usaha",
+        "alamat_usaha",
+        "provinsi",
+        "kabupaten",
+        "kecamatan",
+        "desa",
+        "status_filter",
+        "rtotal",
+        "sumber_data",
+        "skala_usaha",
+        "idsbr",
+        "history_profiling",
+        "f_latlong",
+        "f_gc",
+    ]
+    payload = {}
+
+    def pick_value(name):
+        selectors = [
+            f"[name='{name}']",
+            f"#{name}",
+            f"#f_{name}",
+        ]
+        for selector in selectors:
+            try:
+                locator = page.locator(selector)
+                if locator.count() > 0:
+                    return locator.first.input_value()
+            except Exception:
+                continue
+        return ""
+
+    for key in keys:
+        if key == "status_filter":
+            payload[key] = status_filter
+            continue
+        payload[key] = pick_value(key)
+
+    if not payload.get("rtotal"):
+        payload["rtotal"] = "0"
+    return payload
+
+
+def _classify_status(gcs_result):
+    if gcs_result is None:
+        return "Belum GC"
+    value = str(gcs_result).strip()
+    if not value:
+        return "Belum GC"
+    if value == "4":
+        return "Duplikat"
+    return "Sudah GC"
+
+
+def _normalize_record(record, batch_start, captured_at):
+    def get(key):
+        return record.get(key) if isinstance(record, dict) else None
+
+    gcs_result = get("gcs_result")
+    return {
+        "idsbr": get("idsbr"),
+        "nama_usaha": get("nama_usaha"),
+        "alamat_usaha": get("alamat_usaha"),
+        "kegiatan_usaha": get("kegiatan_usaha"),
+        "skala_usaha": get("skala_usaha"),
+        "sumber_data": get("sumber_data"),
+        "kode_wilayah": get("kode_wilayah"),
+        "kdprov": get("kdprov"),
+        "kdkab": get("kdkab"),
+        "kdkec": get("kdkec"),
+        "kddesa": get("kddesa"),
+        "nmprov": get("nmprov"),
+        "nmkab": get("nmkab"),
+        "nmkec": get("nmkec"),
+        "nmdesa": get("nmdesa"),
+        "latitude": get("latitude"),
+        "longitude": get("longitude"),
+        "latlong_status": get("latlong_status"),
+        "gcs_result": gcs_result,
+        "status_gc": _classify_status(gcs_result),
+        "status_perusahaan": get("status_perusahaan"),
+        "gc_username": get("gc_username"),
+        "latitude_gc": get("latitude_gc"),
+        "longitude_gc": get("longitude_gc"),
+        "latlong_status_gc": get("latlong_status_gc"),
+        "history_ref_profiling_id": get("history_ref_profiling_id"),
+        "perusahaan_id": get("perusahaan_id"),
+        "captured_at": captured_at,
+        "batch_start": batch_start,
+    }
+
+
+def _ensure_sheet(workbook, name, columns):
+    if name in workbook.sheetnames:
+        sheet = workbook[name]
+    else:
+        sheet = workbook.create_sheet(title=name)
+    if (
+        sheet.max_row == 1
+        and sheet.max_column == 1
+        and sheet.cell(1, 1).value is None
+    ):
+        sheet.append(columns)
+    return sheet
+
+
+def _append_xlsx_split(xlsx_path, rows, columns):
+    if not rows:
+        return
+    try:
+        import openpyxl
+    except ImportError as exc:
+        raise RuntimeError(
+            "Install openpyxl to write recap Excel."
+        ) from exc
+
+    new_book = not os.path.exists(xlsx_path)
+    if new_book:
+        workbook = openpyxl.Workbook()
+        active = workbook.active
+        active.title = SPLIT_SHEETS[0]
+    else:
+        workbook = openpyxl.load_workbook(xlsx_path)
+
+    for name in SPLIT_SHEETS:
+        _ensure_sheet(workbook, name, columns)
+
+    grouped = {name: [] for name in SPLIT_SHEETS}
+    for row in rows:
+        status = row.get("status_gc") or "Belum GC"
+        if status not in grouped:
+            status = "Belum GC"
+        grouped[status].append(row)
+
+    for name, items in grouped.items():
+        if not items:
+            continue
+        sheet = workbook[name]
+        for row in items:
+            sheet.append([row.get(col, "") for col in columns])
+
+    workbook.save(xlsx_path)
+    workbook.close()
+
+
+def _load_checkpoint(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return None
+
+
+def _save_checkpoint(path, data):
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+    except Exception:
+        return False
+    return True
+
+
+def _fetch_page(page, url, payload, headers, timeout_ms=60000):
+    response = page.request.post(
+        url, form=payload, headers=headers, timeout=timeout_ms
+    )
+    status = response.status
+    if status != 200:
+        return status, None
+    try:
+        return status, response.json()
+    except Exception:
+        return status, None
+
+
+def run_recap(
+    page,
+    monitor,
+    *,
+    status_filter="semua",
+    length=500,
+    output_dir=None,
+    sleep_ms=800,
+    max_retries=3,
+    resume=True,
+    progress_callback=None,
+):
+    log_info(
+        "Starting recap.",
+        status_filter=status_filter,
+        length=length,
+    )
+    if length < 1:
+        length = 100
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    os.makedirs(output_dir, exist_ok=True)
+    checkpoint_path = os.path.join(output_dir, CHECKPOINT_FILENAME)
+
+    checkpoint = _load_checkpoint(checkpoint_path) if resume else None
+    start_at = 0
+    total_records = None
+    output_path = None
+    columns = None
+    effective_records_hint = None
+
+    if checkpoint and checkpoint.get("status") == "running":
+        if checkpoint.get("status_filter") == status_filter:
+            start_at = checkpoint.get("last_start", 0)
+            length = checkpoint.get("length", length)
+            total_records = checkpoint.get("records_total")
+            effective_records_hint = checkpoint.get("records_filtered")
+            output_path = checkpoint.get("output_path")
+            columns = checkpoint.get("columns")
+            if output_path and os.path.exists(output_path):
+                log_info(
+                    "Resuming recap from checkpoint.",
+                    start_at=start_at,
+                    length=length,
+                    output_path=output_path or "-",
+                )
+            else:
+                log_warn(
+                    "Checkpoint missing output file; starting new run.",
+                    output_path=output_path or "-",
+                )
+                start_at = 0
+                total_records = None
+                output_path = None
+                columns = None
+        else:
+            log_warn(
+                "Checkpoint filter differs; starting new run.",
+                checkpoint_filter=checkpoint.get("status_filter"),
+                current_filter=status_filter,
+            )
+
+    start_ts = checkpoint.get("run_started_at") if checkpoint else _now_readable()
+    if not output_path:
+        output_path = _build_output_path(output_dir)
+
+    base_payload = _collect_filter_payload(page, status_filter)
+    csrf_token = _extract_csrf_token(page)
+    if csrf_token:
+        base_payload["_token"] = csrf_token
+    base_payload["status_filter"] = status_filter
+
+    url = "https://matchapro.web.bps.go.id/direktori-usaha/data-gc-card"
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": page.url,
+    }
+
+    current_start = start_at
+    effective_records = (
+        effective_records_hint
+        if isinstance(effective_records_hint, int) and effective_records_hint > 0
+        else total_records
+    )
+    processed_total = 0
+    while True:
+        monitor.mark_activity("recap")
+        payload = dict(base_payload)
+        payload["start"] = str(current_start)
+        payload["length"] = str(length)
+
+        attempt = 0
+        data = None
+        records_filtered = None
+        status_code = None
+        while attempt < max_retries:
+            attempt += 1
+            try:
+                status_code, response_json = _fetch_page(
+                    page, url, payload, headers
+                )
+            except Exception as exc:
+                monitor.mark_activity("recap")
+                log_warn(
+                    "Request failed; retrying.",
+                    error=str(exc),
+                    attempt=attempt,
+                )
+                monitor.wait_for_condition(
+                    lambda: False, timeout_s=max(0.1, sleep_ms / 1000)
+                )
+                continue
+
+            if status_code == 419:
+                monitor.mark_activity("recap")
+                log_warn("CSRF token expired; reloading page.")
+                try:
+                    page.reload(wait_until="domcontentloaded")
+                except Exception:
+                    pass
+                csrf_token = _extract_csrf_token(page)
+                if csrf_token:
+                    base_payload["_token"] = csrf_token
+                continue
+
+            if status_code != 200 or not isinstance(response_json, dict):
+                monitor.mark_activity("recap")
+                log_warn(
+                    "Unexpected response; retrying.",
+                    status=status_code,
+                    attempt=attempt,
+                )
+                monitor.wait_for_condition(
+                    lambda: False, timeout_s=max(0.1, sleep_ms / 1000)
+                )
+                continue
+
+            data = response_json.get("data") or []
+            records_filtered = _to_int(response_json.get("recordsFiltered"))
+            total_records = _to_int(response_json.get("recordsTotal"))
+            if total_records:
+                effective_records = total_records
+            if records_filtered is not None and records_filtered > 0:
+                effective_records = records_filtered
+            elif records_filtered == 0 and data:
+                records_filtered = None
+            break
+
+        if data is None:
+            monitor.mark_activity("recap")
+            log_error(
+                "Failed to fetch data after retries; stopping.",
+                start=current_start,
+            )
+            break
+
+        if current_start == start_at and data and len(data) < length:
+            if records_filtered and records_filtered > len(data):
+                length = len(data)
+                log_warn(
+                    "Server capped page size; adjusting length.",
+                    new_length=length,
+                )
+                payload["length"] = str(length)
+
+        if not data:
+            monitor.mark_activity("recap")
+            log_info("No more data returned; stopping.", start=current_start)
+            break
+
+        captured_at = _now_readable()
+        rows = [
+            _normalize_record(item, current_start, captured_at) for item in data
+        ]
+        if columns is None:
+            columns = list(rows[0].keys()) if rows else []
+        _append_xlsx_split(output_path, rows, columns)
+        monitor.mark_activity("recap")
+        processed_total += len(rows)
+        log_info(
+            "Batch saved.",
+            start=current_start,
+            count=len(rows),
+            total=(
+                records_filtered
+                if records_filtered is not None
+                else (effective_records if effective_records is not None else "-")
+            ),
+        )
+        if progress_callback:
+            total_value = (
+                effective_records
+                if isinstance(effective_records, int) and effective_records > 0
+                else 0
+            )
+            try:
+                progress_callback(processed_total, total_value, 0)
+            except Exception:
+                pass
+
+        checkpoint_data = {
+            "status": "running",
+            "run_started_at": start_ts,
+            "last_start": current_start,
+            "length": length,
+            "records_total": total_records,
+            "records_filtered": records_filtered,
+            "status_filter": status_filter,
+            "output_path": output_path,
+            "columns": columns,
+            "split_sheets": list(SPLIT_SHEETS),
+            "updated_at": captured_at,
+        }
+        _save_checkpoint(checkpoint_path, checkpoint_data)
+
+        current_start += length
+        if records_filtered is not None and current_start >= records_filtered:
+            break
+        if records_filtered is None and len(data) < length:
+            break
+
+        if sleep_ms:
+            monitor.mark_activity("recap")
+            monitor.wait_for_condition(
+                lambda: False, timeout_s=max(0.1, sleep_ms / 1000)
+            )
+
+    if not os.path.exists(output_path):
+        raise RuntimeError("Recap Excel not found; no data saved.")
+
+    checkpoint_done = {
+        "status": "done",
+        "run_started_at": start_ts,
+        "run_finished_at": _now_readable(),
+        "length": length,
+        "records_total": total_records,
+        "records_filtered": effective_records,
+        "status_filter": status_filter,
+        "output_path": output_path,
+        "columns": columns,
+        "split_sheets": list(SPLIT_SHEETS),
+    }
+    _save_checkpoint(checkpoint_path, checkpoint_done)
+    log_info("Recap saved.", path=output_path)
+    return output_path

@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import time
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
@@ -18,6 +19,7 @@ from .credentials import load_credentials
 from .logging_utils import log_info, log_warn
 from .vpn import ensure_vpn_connected
 from .processor import process_excel_rows
+from .recap import run_recap
 from .settings import (
     DEFAULT_CREDENTIALS_FILE,
     DEFAULT_EXCEL_FILE,
@@ -29,6 +31,7 @@ from .settings import (
     BLOCK_RESOURCE_DOMAINS,
     BLOCK_RESOURCE_TYPES,
     ENABLE_RESOURCE_BLOCKING,
+    MATCHAPRO_HOST,
     RATE_LIMIT_PROFILES,
     DEFAULT_VPN_PREFIXES,
     SUBMIT_MODES,
@@ -99,12 +102,96 @@ def build_parser():
         "-k",
         "--keep-open",
         action="store_true",
-        help="Keep the browser open until you press Enter.",
+        default=True,
+        help="Keep the browser open until you press Enter (default: on).",
+    )
+    parser.add_argument(
+        "--no-keep-open",
+        action="store_false",
+        dest="keep_open",
+        help="Close the browser automatically after the run.",
     )
     parser.add_argument(
         "--dirgc-only",
         action="store_true",
         help="Stop after reaching the DIRGC page (skip filter/input).",
+    )
+    parser.add_argument(
+        "--recap",
+        "--rekap",
+        dest="recap",
+        action="store_true",
+        help="Fetch DIRGC data via API and export Excel recap.",
+    )
+    parser.add_argument(
+        "--recap-length",
+        "--rekap-length",
+        dest="recap_length",
+        type=int,
+        default=500,
+        help="Pagination size for recap (default: 500).",
+    )
+    parser.add_argument(
+        "--recap-output-dir",
+        "--rekap-output-dir",
+        dest="recap_output_dir",
+        help="Output directory for recap Excel (default: logs/recap).",
+    )
+    parser.add_argument(
+        "--recap-sleep-ms",
+        "--rekap-sleep-ms",
+        dest="recap_sleep_ms",
+        type=int,
+        default=800,
+        help="Delay between recap requests in ms (default: 800).",
+    )
+    parser.add_argument(
+        "--recap-max-retries",
+        "--rekap-max-retries",
+        dest="recap_max_retries",
+        type=int,
+        default=3,
+        help="Max retries per page request (default: 3).",
+    )
+    parser.add_argument(
+        "--recap-no-resume",
+        "--rekap-no-resume",
+        dest="recap_no_resume",
+        action="store_true",
+        help="Ignore existing checkpoint and start a new recap run.",
+    )
+    parser.add_argument(
+        "--api-log",
+        action="store_true",
+        help=(
+            "Log API endpoints + sample responses from MatchaPro "
+            "to logs/api."
+        ),
+    )
+    parser.add_argument(
+        "--api-log-dir",
+        help="Output directory for API log (default: logs/api).",
+    )
+    parser.add_argument(
+        "--api-log-max",
+        type=int,
+        default=30,
+        help="Maximum unique endpoints to capture (default: 30).",
+    )
+    parser.add_argument(
+        "--api-log-body-limit",
+        type=int,
+        default=2000,
+        help="Max response preview chars per endpoint (default: 2000).",
+    )
+    parser.add_argument(
+        "--api-log-wait-s",
+        type=int,
+        default=20,
+        help=(
+            "Seconds to wait for API responses after DIRGC loads "
+            "(default: 20)."
+        ),
     )
     parser.add_argument(
         "--edit-nama-alamat",
@@ -219,6 +306,17 @@ def run_dirgc(
     session_refresh_every=DEFAULT_SESSION_REFRESH_EVERY,
     vpn_prefixes=None,
     stop_on_cooldown=False,
+    api_log=False,
+    api_log_dir=None,
+    api_log_max=30,
+    api_log_body_limit=2000,
+    api_log_wait_s=20,
+    recap=False,
+    recap_length=500,
+    recap_output_dir=None,
+    recap_sleep_ms=800,
+    recap_max_retries=3,
+    recap_resume=True,
 ):
     prefixes = None
     if isinstance(vpn_prefixes, str) and vpn_prefixes.strip():
@@ -269,7 +367,12 @@ def run_dirgc(
             java_script_enabled=True,
             permissions=["geolocation"]
         )
-        if ENABLE_RESOURCE_BLOCKING and (BLOCK_RESOURCE_TYPES or BLOCK_RESOURCE_DOMAINS):
+        resource_blocking_enabled = (
+            ENABLE_RESOURCE_BLOCKING
+            and not api_log
+            and (BLOCK_RESOURCE_TYPES or BLOCK_RESOURCE_DOMAINS)
+        )
+        if resource_blocking_enabled:
             def _route_handler(route):
                 domain = urlparse(route.request.url).netloc.lower()
                 if domain in BLOCK_RESOURCE_DOMAINS:
@@ -283,21 +386,37 @@ def run_dirgc(
             context.route("**/*", _route_handler)
         page = context.new_page()
         install_429_response_logger(page)
+        api_log_state = None
+        if api_log:
+            output_dir = api_log_dir or os.path.join(os.getcwd(), "logs", "api")
+            api_log_state = install_api_logger(
+                page,
+                output_dir=output_dir,
+                max_entries=api_log_max,
+                body_limit=api_log_body_limit,
+            )
+            log_info(
+                "API logging enabled.",
+                output_dir=output_dir,
+                max_entries=api_log_max,
+                body_limit=api_log_body_limit,
+            )
         page.set_default_timeout(web_timeout_s * 1000)
         page.set_default_navigation_timeout(web_timeout_s * 1000)
-        def speed_route(route, request):
-            rt = request.resource_type
-            url = request.url
+        if resource_blocking_enabled:
+            def speed_route(route, request):
+                rt = request.resource_type
+                url = request.url
 
-            # block heavy third-party + visual assets
-            if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
-                return route.abort()
-            if rt in ("image", "font", "media"):
-                return route.abort()
+                # block heavy third-party + visual assets
+                if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
+                    return route.abort()
+                if rt in ("image", "font", "media"):
+                    return route.abort()
 
-            return route.continue_()
+                return route.continue_()
 
-        page.route("**/*", speed_route)
+            page.route("**/*", speed_route)
 
         context.add_init_script("""
             // Anti-redefine conflict
@@ -326,7 +445,27 @@ def run_dirgc(
             use_saved_credentials=not manual_only,
             credentials=credentials_value,
         )
-        if dirgc_only:
+        if dirgc_only or api_log or recap:
+            wait_for_dirgc_ready(page, monitor, timeout_s=30)
+        if api_log and api_log_state and api_log_wait_s:
+            wait_for_api_capture(
+                monitor,
+                api_log_state,
+                timeout_s=api_log_wait_s,
+            )
+        if recap:
+            run_recap(
+                page,
+                monitor,
+                status_filter="semua",
+                length=recap_length,
+                output_dir=recap_output_dir,
+                sleep_ms=recap_sleep_ms,
+                max_retries=recap_max_retries,
+                resume=recap_resume,
+                progress_callback=progress_callback,
+            )
+        elif dirgc_only:
             log_info(
                 "DIRGC page ready; skipping Excel processing.",
                 url=page.url,
@@ -547,6 +686,270 @@ def install_429_response_logger(page, body_limit=800, request_body_limit=800):
     page.on("response", handle_response)
 
 
+def wait_for_dirgc_ready(page, monitor, timeout_s=30):
+    def is_ready():
+        selectors = [
+            "#search-idsbr",
+            "#toggle-filter",
+            ".usaha-card-header",
+            ".empty-state",
+            ".no-data",
+            ".no-results",
+        ]
+        for selector in selectors:
+            locator = page.locator(selector)
+            if locator.count() > 0 and locator.first.is_visible():
+                return True
+        return False
+
+    if monitor.wait_for_condition(is_ready, timeout_s=timeout_s):
+        return True
+
+    log_warn("DIRGC UI not ready; retrying with reload.")
+    try:
+        page.reload(wait_until="domcontentloaded")
+    except Exception:
+        return False
+    return monitor.wait_for_condition(is_ready, timeout_s=timeout_s)
+
+
+def wait_for_api_capture(monitor, api_log_state, timeout_s=20):
+    def has_capture():
+        entries = api_log_state.get("entries") or []
+        for entry in entries:
+            if entry.get("response_preview"):
+                return True
+            if entry.get("response_error") and entry.get("response_error") != "-":
+                return True
+        return False
+
+    if monitor.wait_for_condition(has_capture, timeout_s=timeout_s):
+        return True
+    log_warn(
+        "No API response captured yet. Keep the browser open and try scrolling.",
+        wait_s=timeout_s,
+        output_path=api_log_state.get("output_path", "-"),
+    )
+    return False
+
+
+def install_api_logger(
+    page,
+    *,
+    output_dir=None,
+    max_entries=30,
+    body_limit=2000,
+):
+    if not output_dir:
+        output_dir = os.path.join(os.getcwd(), "logs", "api")
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join(output_dir, f"api_endpoints_{timestamp}.json")
+    seen = set()
+    entries = []
+    state = {
+        "entries": entries,
+        "output_path": output_path,
+    }
+
+    def _truncate_text(text, limit):
+        if text is None:
+            return ""
+        text = str(text)
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}... (truncated {len(text) - limit} chars)"
+
+    def _redact_payload(text):
+        if not text:
+            return ""
+        sensitive = {
+            "password",
+            "pass",
+            "otp",
+            "token",
+            "_token",
+            "gc_token",
+            "authorization",
+        }
+        try:
+            if text.strip().startswith("{"):
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    for key in list(parsed.keys()):
+                        if key.lower() in sensitive:
+                            parsed[key] = "***"
+                    return json.dumps(parsed, ensure_ascii=False)
+        except Exception:
+            pass
+        try:
+            parsed = parse_qs(text, keep_blank_values=True)
+            if parsed:
+                redacted = {}
+                for key, values in parsed.items():
+                    if key.lower() in sensitive:
+                        redacted[key] = ["***"]
+                    else:
+                        redacted[key] = values
+                parts = []
+                for key, values in redacted.items():
+                    for value in values:
+                        parts.append(f"{key}={value}")
+                return "&".join(parts)
+        except Exception:
+            pass
+        return text
+
+    def _redact_obj(obj, depth=0, max_depth=4):
+        sensitive = {
+            "password",
+            "pass",
+            "otp",
+            "token",
+            "_token",
+            "gc_token",
+            "authorization",
+            "access_token",
+            "refresh_token",
+        }
+        if depth > max_depth:
+            return obj
+        if isinstance(obj, dict):
+            redacted = {}
+            for key, value in obj.items():
+                if str(key).lower() in sensitive:
+                    redacted[key] = "***"
+                else:
+                    redacted[key] = _redact_obj(value, depth + 1, max_depth)
+            return redacted
+        if isinstance(obj, list):
+            limited = obj[:5]
+            tail = "..." if len(obj) > 5 else None
+            cleaned = [
+                _redact_obj(value, depth + 1, max_depth)
+                for value in limited
+            ]
+            if tail is not None:
+                cleaned.append(tail)
+            return cleaned
+        return obj
+
+    def _sample_payload(payload):
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            payload = dict(payload)
+            payload["data"] = payload["data"][:3]
+            return payload
+        if isinstance(payload, list):
+            return payload[:3]
+        return payload
+
+    def _write_entries():
+        try:
+            with open(output_path, "w", encoding="utf-8") as handle:
+                json.dump(entries, handle, ensure_ascii=False, indent=2)
+        except Exception:
+            return
+
+    def handle_response(response):
+        if len(entries) >= max_entries:
+            return
+
+        try:
+            url = response.url or ""
+        except Exception:
+            return
+
+        if MATCHAPRO_HOST not in url:
+            return
+
+        try:
+            request = response.request
+            method = request.method or "GET"
+            resource_type = request.resource_type or ""
+            request_body = request.post_data or ""
+        except Exception:
+            method = "GET"
+            resource_type = ""
+            request_body = ""
+
+        if resource_type and resource_type not in ("xhr", "fetch"):
+            return
+
+        try:
+            headers = response.headers or {}
+        except Exception:
+            headers = {}
+        content_type = headers.get("content-type") or headers.get("Content-Type") or ""
+        if "json" not in content_type.lower():
+            return
+
+        try:
+            status = response.status
+        except Exception:
+            status = None
+
+        endpoint = urlparse(url)
+        endpoint_key = f"{method} {endpoint.scheme}://{endpoint.netloc}{endpoint.path}"
+        if endpoint_key in seen:
+            return
+        seen.add(endpoint_key)
+
+        response_preview = ""
+        response_error = ""
+        response_size = headers.get("content-length") or ""
+        try:
+            body_bytes = response.body()
+            response_text = ""
+            if body_bytes:
+                response_text = body_bytes.decode("utf-8", errors="replace")
+            if response_text.strip().startswith("{") or response_text.strip().startswith("["):
+                parsed = json.loads(response_text)
+                sampled = _sample_payload(parsed)
+                redacted = _redact_obj(sampled)
+                response_preview = _truncate_text(
+                    json.dumps(redacted, ensure_ascii=False), body_limit
+                )
+            else:
+                response_preview = _truncate_text(response_text, body_limit)
+        except Exception as exc:
+            response_error = str(exc)
+
+        entry = {
+            "endpoint": endpoint_key,
+            "sample_url": url,
+            "method": method,
+            "status": status,
+            "content_type": content_type or "-",
+            "content_length": response_size or "-",
+            "request_body": _truncate_text(
+                _redact_payload(request_body), body_limit
+            ),
+            "response_preview": response_preview,
+            "response_error": response_error or "-",
+            "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        entries.append(entry)
+        _write_entries()
+        if response_preview:
+            log_info(
+                "API response captured.",
+                endpoint=endpoint_key,
+                status=status,
+                output_path=output_path,
+            )
+        elif response_error and response_error != "-":
+            log_warn(
+                "API response captured but body could not be read.",
+                endpoint=endpoint_key,
+                status=status,
+                error=response_error,
+                output_path=output_path,
+            )
+
+    page.on("response", handle_response)
+    return state
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -583,6 +986,17 @@ def main():
         session_refresh_every=args.session_refresh_every,
         vpn_prefixes=args.vpn_prefixes,
         stop_on_cooldown=args.stop_on_cooldown,
+        api_log=args.api_log,
+        api_log_dir=args.api_log_dir,
+        api_log_max=args.api_log_max,
+        api_log_body_limit=args.api_log_body_limit,
+        api_log_wait_s=args.api_log_wait_s,
+        recap=args.recap,
+        recap_length=args.recap_length,
+        recap_output_dir=args.recap_output_dir,
+        recap_sleep_ms=args.recap_sleep_ms,
+        recap_max_retries=args.recap_max_retries,
+        recap_resume=not args.recap_no_resume,
     )
 
 

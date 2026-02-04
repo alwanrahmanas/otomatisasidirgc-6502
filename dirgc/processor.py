@@ -457,7 +457,9 @@ def process_excel_rows(
     session_refresh_every=0,
     stop_on_cooldown=False,
 ):
-    run_log_path = build_run_log_path()
+    run_log_path = build_run_log_path(
+        log_type="update" if update_mode else "run"
+    )
     run_log_rows = []
     try:
         rows = load_excel_rows(excel_file)

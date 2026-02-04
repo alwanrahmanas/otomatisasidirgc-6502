@@ -4,12 +4,14 @@ from pathlib import Path
 
 
 LOGS_DIR = "logs"
+DEFAULT_LOG_TYPE = "run"
 
 
-def _next_run_number(date_dir):
+def _next_run_number(date_dir, prefix):
     max_run = 0
-    for path in date_dir.glob("run*_*.xlsx"):
-        match = re.match(r"run(\d+)_", path.stem)
+    pattern = f"{prefix}*_*.xlsx"
+    for path in date_dir.glob(pattern):
+        match = re.match(rf"{re.escape(prefix)}(\d+)_", path.stem)
         if not match:
             continue
         try:
@@ -21,14 +23,17 @@ def _next_run_number(date_dir):
     return max_run + 1
 
 
-def build_run_log_path(now=None):
+def build_run_log_path(*, now=None, log_type=None):
     now = now or datetime.now()
+    log_type = (log_type or DEFAULT_LOG_TYPE).strip().lower()
+    if log_type not in {"run", "update"}:
+        log_type = DEFAULT_LOG_TYPE
     date_folder = now.strftime("%Y%m%d")
-    date_dir = Path(LOGS_DIR) / date_folder
+    date_dir = Path(LOGS_DIR) / log_type / date_folder
     date_dir.mkdir(parents=True, exist_ok=True)
-    run_number = _next_run_number(date_dir)
+    run_number = _next_run_number(date_dir, log_type)
     time_label = now.strftime("%H%M")
-    filename = f"run{run_number}_{time_label}.xlsx"
+    filename = f"{log_type}{run_number}_{time_label}.xlsx"
     return date_dir / filename
 
 
