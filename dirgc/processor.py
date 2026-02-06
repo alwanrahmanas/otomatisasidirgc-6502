@@ -1,4 +1,5 @@
 import json
+import math
 import re
 import time
 
@@ -187,6 +188,47 @@ def _parse_int(value):
         return int(float(value))
     except (TypeError, ValueError):
         return None
+
+
+_COORD_EMPTY_MARKERS = {
+    "",
+    "-",
+    "--",
+    "n/a",
+    "na",
+    "n.a.",
+    "nan",
+    "none",
+    "null",
+    "undefined",
+}
+
+
+def _normalize_coord_text(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.lower() in _COORD_EMPTY_MARKERS:
+        return ""
+    return text
+
+
+def _parse_coord_value(value, min_value, max_value):
+    text = _normalize_coord_text(value)
+    if not text:
+        return None
+    text = text.replace(",", ".")
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number):
+        return None
+    if number < min_value or number > max_value:
+        return None
+    return number
 
 
 def _extract_cooldown_seconds(body_text, headers):
@@ -972,8 +1014,8 @@ def process_excel_rows(
                     current_value = locator.first.input_value()
                 except Exception:
                     current_value = ""
-                current_value = (current_value or "").strip()
-                desired_value = str(value).strip() if value is not None else ""
+                current_value = _normalize_coord_text(current_value)
+                desired_value = _normalize_coord_text(value)
 
                 if allow_overwrite:
                     if desired_value:
@@ -1345,7 +1387,13 @@ def process_excel_rows(
                 continue
 
             if swal_result == "confirm":
-                if not latitude_value and not longitude_value:
+                has_valid_lat = (
+                    _parse_coord_value(latitude_value, -90, 90) is not None
+                )
+                has_valid_lon = (
+                    _parse_coord_value(longitude_value, -180, 180) is not None
+                )
+                if not (has_valid_lat and has_valid_lon):
                     confirm_popup = page.locator(
                         ".swal2-popup", has_text=confirm_text
                     )
