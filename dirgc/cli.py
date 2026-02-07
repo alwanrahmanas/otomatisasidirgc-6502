@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import subprocess
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -342,9 +343,7 @@ def run_dirgc(
         # browser = p.chromium.launch(headless=headless)
         # context = browser.new_context()
         # page = context.new_page()
-        browser = p.chromium.launch(
-            headless=headless,
-            args=[
+        browser_args = [
                 '--disable-blink-features=AutomationControlled',
                 '--disable-dev-shm-usage',
                 '--no-sandbox',
@@ -354,7 +353,34 @@ def run_dirgc(
                 '--disable-extensions',
                 '--user-agent=Mozilla/5.0 (Linux; Android 12; M2010J19CG Build/SKQ1.211202.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.192 Mobile Safari/537.36'
             ]
-        )
+        try:
+            browser = p.chromium.launch(
+                headless=headless,
+                args=browser_args
+            )
+        except Exception as exc:
+            # Check for common Playwright "browser not found" messages
+            err_msg = str(exc)
+            if "Executable doesn't exist" in err_msg or "playwright install" in err_msg:
+                log_warn("Browser chromium tidak ditemukan. Memulai instalasi otomatis...")
+                log_info("Proses ini membutuhkan waktu beberapa menit tergantung koneksi internet.")
+                try:
+                    # Run 'playwright install chromium'
+                    subprocess.check_call(
+                        [sys.executable, "-m", "playwright", "install", "chromium"],
+                        stdout=sys.stdout,
+                        stderr=sys.stderr
+                    )
+                    log_info("Instalasi browser selesai. Melanjutkan proses...")
+                    browser = p.chromium.launch(
+                        headless=headless,
+                        args=browser_args
+                    )
+                except Exception as install_exc:
+                    log_warn(f"Gagal menginstall browser otomatis: {install_exc}")
+                    raise exc
+            else:
+                raise exc
         
         # CONTEXT ANDROID WEBVIEW
         context = browser.new_context(
